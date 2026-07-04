@@ -23,7 +23,8 @@ This project follows a simple changelog format while it is still pre-release.
 ### Safety
 
 - Refuses to switch accounts when `~/.codex` exists but is not a symlink.
-- Refuses stop, start, restart, switch, and migration commands when they are run from a detected Codex terminal environment.
+- Delegates stop, switch, and restart commands to Terminal.app when they are run from a detected Codex terminal environment.
+- Refuses start and migration commands when they are run from a detected Codex terminal environment.
 - Refuses first-time migration while the Codex app is still running.
 - Refuses first-time migration when the script cannot confirm whether the Codex app is running.
 - Refuses first-time migration when the target account directory already exists.

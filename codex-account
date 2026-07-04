@@ -81,13 +81,13 @@ codex-account - Codex 多账号切换工具
   codex-account switch <账号名> [--no-stop] [--no-start] [--force]
   codex-account <账号名>
       关闭 Codex App -> 切换 ~/.codex 软链接 -> 启动 Codex App。
-      不能在 Codex 内置 Terminal 中执行。
+      如在 Codex 内置 Terminal 中执行，会自动转交给外部 Terminal。
       例如: codex-account work
             codex-account personal --no-start
 
   codex-account stop [--force]
       关闭 Codex App。默认优雅退出；--force 会在超时后 killall。
-      不能在 Codex 内置 Terminal 中执行。
+      如在 Codex 内置 Terminal 中执行，会自动转交给外部 Terminal。
 
   codex-account start
       启动 Codex App。
@@ -95,7 +95,7 @@ codex-account - Codex 多账号切换工具
 
   codex-account restart [--force]
       重启 Codex App。
-      不能在 Codex 内置 Terminal 中执行。
+      如在 Codex 内置 Terminal 中执行，会自动转交给外部 Terminal。
 
   codex-account create <账号名> [--migrate-current]
       创建新的账号目录 ~/.codex-<账号名>。
@@ -136,14 +136,14 @@ Usage:
   codex-account switch <account> [--no-stop] [--no-start] [--force]
   codex-account <account>
       Quit Codex App -> switch the ~/.codex symlink -> start Codex App.
-      Must not be run from the built-in Codex terminal.
+      If run from the built-in Codex terminal, it delegates to Terminal.app.
       Examples: codex-account work
                 codex-account personal --no-start
 
   codex-account stop [--force]
       Quit Codex App. By default this asks the app to quit gracefully;
       --force runs killall if the app does not exit before the timeout.
-      Must not be run from the built-in Codex terminal.
+      If run from the built-in Codex terminal, it delegates to Terminal.app.
 
   codex-account start
       Start Codex App.
@@ -151,7 +151,7 @@ Usage:
 
   codex-account restart [--force]
       Restart Codex App.
-      Must not be run from the built-in Codex terminal.
+      If run from the built-in Codex terminal, it delegates to Terminal.app.
 
   codex-account create <account> [--migrate-current]
       Create a new account directory ~/.codex-<account>.
@@ -364,6 +364,90 @@ in_codex_terminal() {
   return 1
 }
 
+shell_quote() {
+  local value="$1"
+  printf "'%s'" "$(printf '%s' "$value" | sed "s/'/'\\\\''/g")"
+}
+
+script_path() {
+  local self="${BASH_SOURCE[0]}"
+  case "$self" in
+    /*) printf '%s\n' "$self" ;;
+    *)
+      printf '%s/%s\n' "$(cd "$(dirname "$self")" >/dev/null 2>&1 && pwd -P)" "$(basename "$self")"
+      ;;
+  esac
+}
+
+external_terminal_command() {
+  local command=""
+  local arg
+
+  command="unset CODEX_SHELL CODEX_THREAD_ID CODEX_SANDBOX CODEX_SANDBOX_NETWORK_DISABLED CODEX_CI CODEX_INTERNAL_ORIGINATOR_OVERRIDE __CFBundleIdentifier;"
+  command="$command export CODEX_APP_NAME=$(shell_quote "$APP_NAME");"
+  command="$command export CODEX_QUIT_TIMEOUT=$(shell_quote "$QUIT_TIMEOUT");"
+  command="$command export CODEX_ACCOUNT_LINK=$(shell_quote "$ACTIVE_LINK");"
+  command="$command export CODEX_ACCOUNT_PREFIX=$(shell_quote "$ACCOUNT_PREFIX");"
+  command="$command export CODEX_ACCOUNT_LANG=$(shell_quote "$UI_LANG");"
+  command="$command bash $(shell_quote "$(script_path)")"
+  for arg in "$@"; do
+    command="$command $(shell_quote "$arg")"
+  done
+  printf '%s\n' "$command"
+}
+
+delegate_to_external_terminal() {
+  local action="$1"
+  shift
+  local command
+  local launcher
+
+  command="$(external_terminal_command "$@")"
+
+  if is_zh; then
+    info "检测到 Codex 内置 Terminal，正在将${action}转交给外部 Terminal.app 执行..."
+  else
+    info "Detected the built-in Codex terminal; delegating $action to Terminal.app..."
+  fi
+
+  launcher="$(mktemp "${TMPDIR:-/tmp}/codex-account.XXXXXX")"
+  mv "$launcher" "$launcher.command"
+  launcher="$launcher.command"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf '%s\n' "$command"
+    printf 'status=$?\n'
+    printf 'printf "\\n[codex-account] Done with exit status %%s. You can close this window.\\n" "$status"\n'
+    printf 'rm -f "$0"\n'
+    printf 'exit "$status"\n'
+  } > "$launcher"
+  chmod +x "$launcher"
+
+  if ! open -a Terminal "$launcher" >/dev/null 2>&1; then
+    rm -f "$launcher"
+    if is_zh; then
+      die "无法打开外部 Terminal.app。请手动打开系统 Terminal 后重新运行该命令。"
+    else
+      die "Could not open Terminal.app. Open the system Terminal manually and run this command again."
+    fi
+  fi
+}
+
+delegate_from_codex_terminal() {
+  local action_zh="$1"
+  local action_en="$2"
+  shift 2
+
+  if in_codex_terminal; then
+    if is_zh; then
+      delegate_to_external_terminal "$action_zh" "$@"
+    else
+      delegate_to_external_terminal "$action_en" "$@"
+    fi
+    exit 0
+  fi
+}
+
 require_external_terminal() {
   local action="$1"
   local action_zh="$action"
@@ -425,7 +509,11 @@ stop_codex() {
   local force="${1:-0}"
   local waited=0
 
-  require_external_terminal "stop"
+  if [ "$force" = "1" ]; then
+    delegate_from_codex_terminal "关闭 Codex" "stop Codex" stop --force
+  else
+    delegate_from_codex_terminal "关闭 Codex" "stop Codex" stop
+  fi
 
   if ! app_running; then
     if is_zh; then info "$APP_NAME 未运行。"; else info "$APP_NAME is not running."; fi
@@ -469,7 +557,11 @@ start_codex() {
 
 restart_codex() {
   local force="$1"
-  require_external_terminal "restart"
+  if [ "$force" = "1" ]; then
+    delegate_from_codex_terminal "重启 Codex" "restart Codex" restart --force
+  else
+    delegate_from_codex_terminal "重启 Codex" "restart Codex" restart
+  fi
   stop_codex "$force"
   start_codex
 }
@@ -477,6 +569,8 @@ restart_codex() {
 switch_account() {
   local name="$1"
   shift || true
+
+  delegate_from_codex_terminal "切换账号" "switch accounts" switch "$name" "$@"
 
   local stop_first=1
   local start_after=1
@@ -498,8 +592,6 @@ switch_account() {
     esac
     shift
   done
-
-  require_external_terminal "switch"
 
   name="$(strip_account_name "$name")"
   validate_account_name "$name"

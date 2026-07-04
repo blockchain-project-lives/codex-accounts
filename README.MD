@@ -6,7 +6,7 @@ English | [Simplified Chinese](README.zh-CN.md) | [Changelog](CHANGELOG.md)
 
 It can gracefully quit the Codex app, switch the account link, and start Codex again in one command.
 
-For safety, commands that stop, start, restart, switch, or migrate accounts must be run from an external system Terminal, not from the built-in Codex terminal.
+For safety, commands that would interrupt the running Codex app are handled carefully when invoked from the built-in Codex terminal: `stop`, `switch`, and `restart` are delegated to Terminal.app, while `start` and migration are blocked.
 
 ## Features
 
@@ -16,7 +16,8 @@ For safety, commands that stop, start, restart, switch, or migrate accounts must
 - List accounts and show the current account.
 - Create new account directories.
 - Migrate an existing first-time `~/.codex` directory into a named account.
-- Refuse lifecycle, switch, and migration commands when they are run inside a detected Codex terminal.
+- Delegate `stop`, `switch`, and `restart` to Terminal.app when they are run from a detected Codex terminal.
+- Refuse `start` and migration from a detected Codex terminal.
 - English and Chinese command output, auto-detected from the system language or forced with `CODEX_ACCOUNT_LANG`.
 
 ## Requirements
@@ -93,7 +94,7 @@ If `~/.codex` exists and is not a symlink, `codex-account` refuses to switch acc
 
 ## Usage
 
-Run lifecycle, switch, and migration commands from an external system Terminal. The built-in Codex terminal is only appropriate for safe read-only commands such as `list` and `current`, or for creating an empty account directory.
+The built-in Codex terminal can run safe commands such as `list`, `current`, and normal `create`. If you run `stop`, `switch`, or `restart` from the built-in Codex terminal, the script opens Terminal.app and runs the command there. Run `start` and migration from an external Terminal yourself.
 
 List accounts:
 
@@ -180,7 +181,8 @@ CODEX_APP_NAME="Codex" codex-account restart
 ## Notes
 
 - Account names may contain letters, numbers, dots, underscores, and hyphens.
-- `stop`, `start`, `restart`, `switch`, and `create <account> --migrate-current` are blocked when the script detects a Codex terminal environment.
+- `stop`, `switch`, and `restart` are delegated to Terminal.app when the script detects a Codex terminal environment.
+- `start` and `create <account> --migrate-current` are blocked when the script detects a Codex terminal environment.
 - `create <account> --migrate-current` only works when Codex is confirmed not running, `~/.codex` exists as a real directory, and `~/.codex-<account>` does not already exist.
 - Switching removes and recreates only the `~/.codex` symlink.
 - Account directories such as `~/.codex-work` are not deleted by switch commands.

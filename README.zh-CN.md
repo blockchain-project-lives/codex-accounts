@@ -6,7 +6,7 @@
 
 切换账号时，它可以自动关闭 Codex App、切换 `~/.codex` 软链接，然后重新启动 Codex App。
 
-出于安全考虑，关闭、启动、重启、切换账号和迁移账号目录这些命令必须在外部系统 Terminal 中执行，不能在 Codex 内置 Terminal 中执行。
+出于安全考虑，在 Codex 内置 Terminal 中执行会影响当前 Codex App 的命令时，脚本会做区分处理：`stop`、`switch/use` 和 `restart` 会自动转交给 Terminal.app 执行，`start` 和迁移仍会被拒绝。
 
 ## 功能
 
@@ -16,7 +16,8 @@
 - 查看账号列表和当前账号。
 - 创建新的账号目录。
 - 将首次使用时已有的 `~/.codex` 真实目录迁移成指定账号。
-- 在检测到 Codex 内置 Terminal 环境时，拒绝执行生命周期、切换和迁移命令。
+- 在检测到 Codex 内置 Terminal 环境时，将 `stop`、`switch/use` 和 `restart` 转交给 Terminal.app 执行。
+- 在检测到 Codex 内置 Terminal 环境时，拒绝执行 `start` 和迁移命令。
 - 支持英文和中文命令输出，可根据系统语言自动判断，也可通过 `CODEX_ACCOUNT_LANG` 强制指定。
 
 ## 要求
@@ -93,7 +94,7 @@ codex-account work
 
 ## 使用方法
 
-关闭、启动、重启、切换和迁移命令请在外部系统 Terminal 中执行。Codex 内置 Terminal 只适合执行 `list`、`current` 这类安全的只读命令，或创建空账号目录。
+Codex 内置 Terminal 可以执行 `list`、`current` 和普通 `create` 这类安全命令。如果你在 Codex 内置 Terminal 中执行 `stop`、`switch/use` 或 `restart`，脚本会打开 Terminal.app 并在外部窗口里运行该命令。`start` 和迁移请自己在外部 Terminal 中执行。
 
 查看账号列表：
 
@@ -180,7 +181,8 @@ CODEX_APP_NAME="Codex" codex-account restart
 ## 注意事项
 
 - 账号名只能包含字母、数字、点、下划线和连字符。
-- 检测到 Codex 内置 Terminal 环境时，`stop`、`start`、`restart`、`switch` 和 `create <账号名> --migrate-current` 都会被拒绝执行。
+- 检测到 Codex 内置 Terminal 环境时，`stop`、`switch/use` 和 `restart` 会被转交给 Terminal.app 执行。
+- 检测到 Codex 内置 Terminal 环境时，`start` 和 `create <账号名> --migrate-current` 会被拒绝执行。
 - `create <账号名> --migrate-current` 只会在确认 Codex 未运行、`~/.codex` 是真实目录且 `~/.codex-<账号名>` 不存在时执行迁移。
 - 切换账号时只会删除并重建 `~/.codex` 这个软链接。
 - `~/.codex-work` 这类账号目录不会被切换命令删除。
