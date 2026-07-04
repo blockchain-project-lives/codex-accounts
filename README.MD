@@ -18,6 +18,7 @@ On macOS, the Python CLI preserves the original app workflow: stop Codex App, sw
 - Switch the active `~/.codex` symlink or directory link.
 - Initialize workspace directories with metadata.
 - Temporarily switch the current workspace account with `accounts use`, then restore the workspace default account.
+- Migrate older `~/.codex-<name>` workspaces and import legacy `~/.codex-accounts` auth snapshots.
 - Keep macOS Codex App stop/start/restart support.
 - Show local token usage stats from Codex `state_*.sqlite` in read-only mode.
 - Block unsafe operations from a detected Codex built-in terminal when they cannot be delegated safely.
@@ -91,7 +92,18 @@ codex-workspaces init personal
 codex-workspaces init work
 ```
 
-Migration from older `~/.codex-<name>` directories is intentionally deferred to a later phase. This release initializes new managed workspaces only.
+Migrate older `~/.codex-<name>` directories without deleting the originals:
+
+```bash
+codex-workspaces migrate --dry-run
+codex-workspaces migrate
+```
+
+If your current `~/.codex` is a real directory instead of a link, migrate it into a named workspace explicitly:
+
+```bash
+codex-workspaces init personal --migrate-current
+```
 
 Set up account snapshots after Codex has created an `auth.json` in the active workspace:
 
@@ -100,6 +112,19 @@ codex-workspaces use work --no-stop --no-start
 codex-workspaces accounts save work
 codex-workspaces accounts set-default work acct_work --activate
 codex-workspaces accounts list
+```
+
+Standalone accounts can be initialized and later populated from the current workspace `auth.json`:
+
+```bash
+codex-workspaces accounts init research
+codex-workspaces accounts save research
+```
+
+Import legacy `codex-accounts` AUTH-mode snapshots:
+
+```bash
+codex-workspaces accounts import-legacy ~/.codex-accounts
 ```
 
 Switch workspaces:
@@ -134,6 +159,8 @@ codex-workspaces accounts restore-default
 ```
 
 `accounts use` only changes the current workspace `active_account_id`; it does not change `default_account_id`. Entering a workspace with `codex-workspaces use <workspace>` restores that workspace's default account when one is configured.
+
+`auth.json` contains credentials. Do not commit workspace directories, account snapshots, SQLite state, sessions, or shell snapshots to git; the project `.gitignore` excludes these patterns for local checkouts.
 
 Manage workspace metadata and lifecycle:
 

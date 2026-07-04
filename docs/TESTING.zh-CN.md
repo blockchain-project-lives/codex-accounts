@@ -8,6 +8,7 @@
 - CLI 行为：命令别名、工作区名快捷切换、错误路径、帮助输出。
 - 管理行为：诊断、列表元信息、重命名、删除保护、备注读写和账号绑定。
 - 账号行为：账号快照保存、列表、临时切换、默认账号恢复、默认账号设置。
+- 迁移行为：旧 `~/.codex-<name>` 工作区迁移、旧 `~/.codex-accounts` 导入、dry-run 不落盘、迁移前备份。
 - 统计行为：只读 `state_*.sqlite`，汇总 token、模型、最近会话和每日用量。
 - 平台行为：macOS App 控制可注入，非 macOS 自动跳过 App 启停，Codex 内置 Terminal 阻止或转交危险操作。
 
@@ -105,6 +106,28 @@ CODEX_WORKSPACES_LINK="$tmp_home/.codex" \
 CODEX_WORKSPACES_ROOT="$tmp_home/.codex-workspaces" \
 codex-workspaces delete scratch --force
 ```
+
+迁移验收可以用临时 HOME 模拟旧布局：
+
+```bash
+tmp_home="$(mktemp -d)"
+mkdir -p "$tmp_home/.codex-work" "$tmp_home/.codex-accounts/research"
+printf '{"account":"work"}\n' > "$tmp_home/.codex-work/auth.json"
+printf '{"account":"research"}\n' > "$tmp_home/.codex-accounts/research/auth.json"
+ln -s "$tmp_home/.codex-work" "$tmp_home/.codex"
+
+HOME="$tmp_home" codex-workspaces migrate --dry-run
+HOME="$tmp_home" codex-workspaces migrate
+HOME="$tmp_home" codex-workspaces accounts list
+```
+
+预期结果：
+
+- `~/.codex-workspaces/workspaces/work` 存在。
+- `~/.codex-workspaces/accounts/acct_work` 和 `acct_research` 存在。
+- `~/.codex` 指向新的 `workspaces/work`。
+- `~/.codex-work` 和 `~/.codex-accounts` 仍保留。
+- `~/.codex-workspaces/backups/<timestamp>/before-migrate/` 下有迁移前备份。
 
 macOS 上再额外验证：
 

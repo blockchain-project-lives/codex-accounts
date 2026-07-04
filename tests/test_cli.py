@@ -114,8 +114,21 @@ class TestCliDispatch:
         assert "acct_work" in output
         assert "active=acct_work default=acct_work" in output
 
-    def test_migrate_command_is_deferred(self, tmp_path: Path) -> None:
+    def test_migrate_and_import_legacy_dispatch(self, tmp_path: Path) -> None:
         manager = manager_for(tmp_path)
+        legacy = manager.config.home_dir / ".codex-work"
+        legacy.mkdir()
+        (legacy / "auth.json").write_text('{"account":"work"}\n', encoding="utf-8")
+        legacy_accounts = manager.config.home_dir / ".codex-accounts"
+        research = legacy_accounts / "research"
+        research.mkdir(parents=True)
+        (research / "auth.json").write_text('{"account":"research"}\n', encoding="utf-8")
 
-        with pytest.raises(CodexWorkspacesError, match="later phase"):
-            run(["migrate", "--dry-run"], manager)
+        assert run(["migrate", "--dry-run"], manager) == 0
+        assert run(["migrate", "--from-prefix", str(manager.config.home_dir / ".codex-")], manager) == 0
+        assert run(["accounts", "import-legacy", str(legacy_accounts)], manager) == 0
+
+        output = manager.stdout.getvalue()
+        assert "Migration plan" in output
+        assert "Migrated workspaces: 1" in output
+        assert "Imported legacy accounts: 1" in output

@@ -189,11 +189,23 @@ class TestWorkspaceManager:
         with pytest.raises(CodexWorkspacesError, match="not a symlink"):
             manager.switch_workspace("work", ["--no-stop", "--no-start"], ["switch", "work"])
 
-    def test_migrate_current_is_deferred_to_later_phase(self, tmp_path: Path) -> None:
+    def test_init_migrate_current_moves_real_codex_into_managed_workspace(self, tmp_path: Path) -> None:
         manager, _, _ = make_manager(tmp_path)
+        manager.config.active_link.mkdir()
+        (manager.config.active_link / "auth.json").write_text('{"account":"current"}\n', encoding="utf-8")
+        (manager.config.active_link / "config.toml").write_text("model = 'gpt'\n", encoding="utf-8")
 
-        with pytest.raises(CodexWorkspacesError, match="later phase"):
-            manager.init_workspace("personal", ["--migrate-current"])
+        manager.init_workspace("personal", ["--migrate-current"])
+
+        directory = manager.workspace_dir("personal")
+        meta = manager.store.read_workspace_meta(directory, "personal")
+        assert manager.current_target().kind == "target"
+        assert manager.same_path(manager.current_target().path, directory)
+        assert (directory / "auth.json").read_text(encoding="utf-8") == '{"account":"current"}\n'
+        assert meta.default_account_id == "acct_personal"
+        assert meta.active_account_id == "acct_personal"
+        assert manager.store.account_auth_path("acct_personal").read_text(encoding="utf-8") == '{"account":"current"}\n'
+        assert any(manager.config.backups_dir.glob("*/before-migrate/codex/auth.json"))
 
     def test_default_switch_skips_app_control_on_non_macos_platforms(self, tmp_path: Path) -> None:
         manager, stdout, _ = make_manager(tmp_path, FakePlatform(app_control=False))
@@ -412,3 +424,93 @@ class TestWorkspaceManager:
             manager.accounts_use("acct_work")
 
         manager.config.lock_file.unlink()
+
+    def test_migrate_dry_run_does_not_modify_files(self, tmp_path: Path) -> None:
+        manager, stdout, _ = make_manager(tmp_path)
+        legacy = manager.config.home_dir / ".codex-work"
+        legacy.mkdir()
+        (legacy / "auth.json").write_text('{"account":"work"}\n', encoding="utf-8")
+
+        manager.migrate(dry_run=True)
+
+        output = stdout.getvalue()
+        assert "Migration plan" in output
+        assert str(legacy) in output
+        assert "acct_work" in output
+        assert not manager.workspace_dir("work").exists()
+        assert not manager.config.root_dir.exists()
+
+    def test_migrate_legacy_workspaces_creates_accounts_and_backup(self, tmp_path: Path) -> None:
+        manager, stdout, _ = make_manager(tmp_path)
+        legacy_work = manager.config.home_dir / ".codex-work"
+        legacy_work.mkdir()
+        (legacy_work / "auth.json").write_text('{"account":"work"}\n', encoding="utf-8")
+        (legacy_work / "state_1.sqlite").write_text("db", encoding="utf-8")
+        legacy_personal = manager.config.home_dir / ".codex-personal"
+        legacy_personal.mkdir()
+        manager.platform.create_directory_link(legacy_work, manager.config.active_link)
+
+        manager.migrate()
+
+        work_dir = manager.workspace_dir("work")
+        personal_dir = manager.workspace_dir("personal")
+        work_meta = manager.store.read_workspace_meta(work_dir, "work")
+        assert work_dir.is_dir()
+        assert personal_dir.is_dir()
+        assert legacy_work.is_dir()
+        assert legacy_personal.is_dir()
+        assert manager.current_target().kind == "target"
+        assert manager.same_path(manager.current_target().path, work_dir)
+        assert work_meta.default_account_id == "acct_work"
+        assert work_meta.active_account_id == "acct_work"
+        assert manager.store.read_account_meta("acct_work").source == "workspace-default"
+        assert manager.store.account_auth_path("acct_work").read_text(encoding="utf-8") == '{"account":"work"}\n'
+        assert any(manager.config.backups_dir.glob("*/before-migrate/legacy-workspaces/.codex-work/auth.json"))
+        assert "Migrated workspaces: 2" in stdout.getvalue()
+
+    def test_migrate_renames_conflicting_legacy_account_ids(self, tmp_path: Path) -> None:
+        manager, _, _ = make_manager(tmp_path)
+        legacy_work = manager.config.home_dir / ".codex-work"
+        legacy_work.mkdir()
+        (legacy_work / "auth.json").write_text('{"account":"workspace"}\n', encoding="utf-8")
+        legacy_account = manager.config.home_dir / ".codex-accounts" / "work"
+        legacy_account.mkdir(parents=True)
+        (legacy_account / "auth.json").write_text('{"account":"legacy"}\n', encoding="utf-8")
+
+        manager.migrate()
+
+        accounts = manager.store.list_accounts()
+        account_ids = {account.id for account in accounts}
+        imported = [account for account in accounts if account.source == "imported"]
+        assert "acct_work" in account_ids
+        assert len(imported) == 1
+        assert imported[0].id.startswith("acct_work_")
+        assert manager.store.account_auth_path(imported[0].id).read_text(encoding="utf-8") == '{"account":"legacy"}\n'
+
+    def test_accounts_import_legacy_imports_old_codex_accounts(self, tmp_path: Path) -> None:
+        manager, stdout, _ = make_manager(tmp_path)
+        legacy_accounts = manager.config.home_dir / ".codex-accounts"
+        account = legacy_accounts / "research"
+        account.mkdir(parents=True)
+        (account / "auth.json").write_text('{"account":"research"}\n', encoding="utf-8")
+
+        manager.accounts_import_legacy(str(legacy_accounts))
+
+        meta = manager.store.read_account_meta("acct_research")
+        assert meta.source == "imported"
+        assert meta.bound_workspace is None
+        assert manager.store.account_auth_path("acct_research").read_text(encoding="utf-8") == '{"account":"research"}\n'
+        assert "Imported legacy accounts: 1" in stdout.getvalue()
+
+    def test_accounts_import_workspaces_creates_missing_default_accounts(self, tmp_path: Path) -> None:
+        manager, stdout, _ = make_manager(tmp_path)
+        manager.init_workspace("work", [])
+        (manager.workspace_dir("work") / "auth.json").write_text('{"account":"work"}\n', encoding="utf-8")
+
+        manager.accounts_import_workspaces()
+
+        meta = manager.store.read_workspace_meta(manager.workspace_dir("work"), "work")
+        assert meta.default_account_id == "acct_work"
+        assert meta.active_account_id == "acct_work"
+        assert manager.store.account_auth_path("acct_work").read_text(encoding="utf-8") == '{"account":"work"}\n'
+        assert "Imported workspace default accounts: 1" in stdout.getvalue()

@@ -124,10 +124,33 @@ def run(argv: Sequence[str], manager: WorkspaceManager) -> int:
         manager.install_self(args[0] if args else None)
         return 0
     if command == "migrate":
-        manager.fail(
-            "migrate 将在后续阶段实现；当前只完成 Phase 1~3。",
-            "migrate will be implemented in a later phase; this build only includes phases 1-3.",
-        )
+        dry_run = False
+        from_prefix = None
+        from_accounts = None
+        index = 0
+        while index < len(args):
+            arg = args[index]
+            if arg == "--dry-run":
+                dry_run = True
+            elif arg == "--from-prefix":
+                index += 1
+                if index >= len(args):
+                    manager.fail("缺少 --from-prefix 路径", "Missing value for --from-prefix")
+                from_prefix = args[index]
+            elif arg.startswith("--from-prefix="):
+                from_prefix = arg.split("=", 1)[1]
+            elif arg == "--from-accounts":
+                index += 1
+                if index >= len(args):
+                    manager.fail("缺少 --from-accounts 路径", "Missing value for --from-accounts")
+                from_accounts = args[index]
+            elif arg.startswith("--from-accounts="):
+                from_accounts = arg.split("=", 1)[1]
+            else:
+                manager.fail(f"未知参数: {arg}", f"Unknown option: {arg}")
+            index += 1
+        manager.migrate(dry_run=dry_run, from_prefix=from_prefix, from_accounts=from_accounts)
+        return 0
 
     try:
         if workspace_dir(manager.config, command).is_dir():
@@ -208,10 +231,23 @@ def run_accounts(args: Sequence[str], manager: WorkspaceManager) -> int:
             )
         manager.accounts_set_default(positional[0], positional[1], activate)
         return 0
-    if command in {"add", "import-workspaces", "import-legacy", "cleanup-login-temp"}:
+    if command == "import-workspaces":
+        if rest:
+            manager.fail(f"未知参数: {rest[0]}", f"Unknown option: {rest[0]}")
+        manager.accounts_import_workspaces()
+        return 0
+    if command == "import-legacy":
+        if len(rest) != 1:
+            manager.fail(
+                "用法: codex-workspaces accounts import-legacy <旧账号目录>",
+                "Usage: codex-workspaces accounts import-legacy <legacy-accounts-dir>",
+            )
+        manager.accounts_import_legacy(rest[0])
+        return 0
+    if command in {"add", "cleanup-login-temp"}:
         manager.fail(
-            f"accounts {command} 将在后续阶段实现；当前只完成 Phase 1~3。",
-            f"accounts {command} will be implemented in a later phase; this build only includes phases 1-3.",
+            f"accounts {command} 依赖 login-temp 登录流程，仍留到后续阶段。",
+            f"accounts {command} depends on the login-temp flow and is still deferred to a later phase.",
         )
     manager.fail(f"未知 accounts 命令: {command}", f"Unknown accounts command: {command}")
     return 1

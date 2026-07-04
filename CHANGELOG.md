@@ -16,6 +16,8 @@ This project follows a simple changelog format while it is still pre-release.
 - Added workspace `rename`, guarded `delete --force`, and local `note` management.
 - Added read-only local SQLite token usage stats with `stats`.
 - Added the unified `~/.codex-workspaces/` root with workspace metadata, account snapshots, and default-account restore behavior.
+- Added legacy workspace migration with `migrate`, `migrate --dry-run`, and `init <workspace> --migrate-current`.
+- Added legacy account import with `accounts import-legacy` and workspace auth import with `accounts import-workspaces`.
 - Added `pyproject.toml`, package metadata, editable install support, and PyPI-ready build configuration.
 - Added GitHub Actions CI for Linux, macOS, Windows, and Python 3.9/3.11/3.13.
 - Added GitHub Actions Trusted Publishing workflow for PyPI releases.
@@ -36,7 +38,8 @@ This project follows a simple changelog format while it is still pre-release.
 - Refuses to switch workspaces when `~/.codex` exists but is not a symlink.
 - Delegates stop, switch, and restart commands to Terminal.app when they are run from a detected Codex terminal environment.
 - Refuses start and migration commands when they are run from a detected Codex terminal environment.
-- Defers migration commands to a later phase instead of partially migrating old layouts.
+- Backs up legacy workspace/account sources before migration and never deletes old directories automatically.
+- Keeps login-temp account login flows deferred instead of mixing interactive login into migration.
 - Saves live `auth.json` before account or workspace switches when an active account is configured.
 - Uses a lock file under `~/.codex-workspaces/lock` for account and workspace switching.
 - Limits workspace names to letters, numbers, dots, underscores, and hyphens.

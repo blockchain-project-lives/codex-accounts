@@ -18,6 +18,7 @@
 - 切换当前 `~/.codex` 软链接或目录链接。
 - 初始化带元数据的工作区目录。
 - 通过 `accounts use` 临时切换当前工作区账号，并可恢复工作区默认账号。
+- 迁移旧版 `~/.codex-<name>` 工作区，并导入旧 `~/.codex-accounts` 账号快照。
 - 保留 macOS 上 Codex App 的 `stop`、`start`、`restart`。
 - 以只读方式读取 Codex `state_*.sqlite`，展示本地 token 用量统计。
 - 在检测到 Codex 内置 Terminal 且无法安全转交时，阻止危险操作。
@@ -91,7 +92,18 @@ codex-workspaces init personal
 codex-workspaces init work
 ```
 
-旧版 `~/.codex-<name>` 目录迁移刻意留到后续阶段。本版本只初始化新的统一目录工作区。
+迁移旧版 `~/.codex-<name>` 目录，不会自动删除旧目录：
+
+```bash
+codex-workspaces migrate --dry-run
+codex-workspaces migrate
+```
+
+如果当前 `~/.codex` 是真实目录而不是链接，需要显式迁移成一个命名工作区：
+
+```bash
+codex-workspaces init personal --migrate-current
+```
 
 在 Codex 已经在当前工作区写入 `auth.json` 后，设置账号快照：
 
@@ -100,6 +112,19 @@ codex-workspaces use work --no-stop --no-start
 codex-workspaces accounts save work
 codex-workspaces accounts set-default work acct_work --activate
 codex-workspaces accounts list
+```
+
+单独账号可以先初始化，再从当前工作区的 `auth.json` 保存进去：
+
+```bash
+codex-workspaces accounts init research
+codex-workspaces accounts save research
+```
+
+导入旧 `codex-accounts` 的 AUTH 模式账号快照：
+
+```bash
+codex-workspaces accounts import-legacy ~/.codex-accounts
 ```
 
 切换工作区：
@@ -134,6 +159,8 @@ codex-workspaces accounts restore-default
 ```
 
 `accounts use` 只修改当前工作区的 `active_account_id`，不会修改 `default_account_id`。执行 `codex-workspaces use <工作区>` 进入某个工作区时，如果配置了默认账号，会恢复该工作区默认账号。
+
+`auth.json` 包含认证凭据，不要提交到 git。工作区目录、账号快照、SQLite 状态、sessions 和 shell snapshots 已在本项目 `.gitignore` 中排除。
 
 管理工作区备注和生命周期：
 

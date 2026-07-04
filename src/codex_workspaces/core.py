@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import platform as platform_module
 import re
@@ -50,6 +51,21 @@ def workspace_dir(config: Config, name: str) -> Path:
 class CurrentTarget:
     kind: str
     path: Optional[Path] = None
+
+
+@dataclass(frozen=True)
+class LegacyWorkspaceCandidate:
+    name: str
+    source: Path
+    target: Path
+    account_id: Optional[str]
+
+
+@dataclass(frozen=True)
+class LegacyAccountCandidate:
+    name: str
+    source: Path
+    target_id: str
 
 
 class WorkspaceManager:
@@ -106,8 +122,8 @@ class WorkspaceManager:
         return sorted(path for path in self.config.workspaces_dir.iterdir() if path.is_dir())
 
     def same_path(self, left: Path, right: Path) -> bool:
-        left_s = os.path.normcase(os.path.abspath(left))
-        right_s = os.path.normcase(os.path.abspath(right))
+        left_s = os.path.normcase(os.path.realpath(left))
+        right_s = os.path.normcase(os.path.realpath(right))
         return left_s == right_s
 
     def current_name(self, target: Path) -> Optional[str]:
@@ -439,6 +455,237 @@ class WorkspaceManager:
                 f"Cannot confirm whether {self.config.app_name} is running. To avoid corrupting config files, confirm {self.config.app_name} is closed from an external terminal before migration.",
             )
 
+    def legacy_workspace_prefix(self, from_prefix: Optional[str] = None) -> Path:
+        if from_prefix:
+            return Path(os.path.expandvars(os.path.expanduser(from_prefix)))
+        return self.config.home_dir / ".codex-"
+
+    def scan_legacy_workspaces(self, from_prefix: Optional[str] = None) -> list[LegacyWorkspaceCandidate]:
+        prefix = self.legacy_workspace_prefix(from_prefix)
+        parent = prefix.parent
+        prefix_name = prefix.name
+        if not parent.is_dir():
+            return []
+
+        candidates: list[LegacyWorkspaceCandidate] = []
+        for path in sorted(parent.iterdir()):
+            if not path.is_dir() or self.platform.is_directory_link(path):
+                continue
+            if not path.name.startswith(prefix_name):
+                continue
+            raw_name = path.name[len(prefix_name) :]
+            if raw_name in {"", "accounts", "workspaces"}:
+                continue
+            try:
+                validate_workspace_name(raw_name)
+            except CodexWorkspacesError:
+                continue
+            target = self.workspace_dir(raw_name)
+            account_id = self.unique_account_id("acct_" + raw_name, path) if (path / "auth.json").is_file() else None
+            candidates.append(LegacyWorkspaceCandidate(raw_name, path, target, account_id))
+        return candidates
+
+    def scan_legacy_accounts(self, legacy_accounts_dir: Path) -> list[LegacyAccountCandidate]:
+        if not legacy_accounts_dir.is_dir():
+            return []
+        candidates: list[LegacyAccountCandidate] = []
+        for directory in sorted(legacy_accounts_dir.iterdir()):
+            if not directory.is_dir() or not (directory / "auth.json").is_file():
+                continue
+            try:
+                target_id = self.unique_account_id(directory.name, directory)
+                name = self.account_name_from_input(directory.name)
+            except CodexWorkspacesError:
+                continue
+            candidates.append(LegacyAccountCandidate(name, directory, target_id))
+        return candidates
+
+    def dedupe_legacy_account_candidates(
+        self,
+        candidates: Sequence[LegacyAccountCandidate],
+        reserved_ids: set[str],
+    ) -> list[LegacyAccountCandidate]:
+        deduped: list[LegacyAccountCandidate] = []
+        for candidate in candidates:
+            target_id = candidate.target_id
+            if target_id in reserved_ids:
+                base = self.account_id_from_input(candidate.name)
+                suffix = hashlib.sha1(str(candidate.source).encode("utf-8")).hexdigest()[:6]
+                target_id = f"{base}_{suffix}"
+                index = 2
+                while target_id in reserved_ids or self.store.account_dir(target_id).exists():
+                    target_id = f"{base}_{suffix}_{index}"
+                    index += 1
+            reserved_ids.add(target_id)
+            deduped.append(LegacyAccountCandidate(candidate.name, candidate.source, target_id))
+        return deduped
+
+    def unique_account_id(self, value: str, salt: Path) -> str:
+        base = self.account_id_from_input(value)
+        if not self.store.account_dir(base).exists():
+            return base
+        suffix = hashlib.sha1(str(salt).encode("utf-8")).hexdigest()[:6]
+        candidate = f"{base}_{suffix}"
+        if not self.store.account_dir(candidate).exists():
+            return candidate
+        index = 2
+        while self.store.account_dir(f"{candidate}_{index}").exists():
+            index += 1
+        return f"{candidate}_{index}"
+
+    def migration_backup_dir(self) -> Path:
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup_dir = self.config.backups_dir / stamp / "before-migrate"
+        suffix = 2
+        while backup_dir.exists():
+            backup_dir = self.config.backups_dir / f"{stamp}-{suffix}" / "before-migrate"
+            suffix += 1
+        return backup_dir
+
+    def copy_path_for_backup(self, source: Path, destination: Path) -> None:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if source.is_symlink():
+            destination.symlink_to(os.readlink(source))
+            return
+        if source.is_dir():
+            shutil.copytree(source, destination, symlinks=True)
+            return
+        if source.exists():
+            shutil.copy2(source, destination)
+
+    def backup_migration_sources(
+        self,
+        backup_dir: Path,
+        workspaces: Sequence[LegacyWorkspaceCandidate],
+        legacy_accounts_dir: Optional[Path],
+    ) -> None:
+        if self.config.active_link.exists() or self.config.active_link.is_symlink():
+            self.copy_path_for_backup(self.config.active_link, backup_dir / "codex")
+        for candidate in workspaces:
+            self.copy_path_for_backup(candidate.source, backup_dir / "legacy-workspaces" / candidate.source.name)
+        if legacy_accounts_dir and legacy_accounts_dir.is_dir():
+            self.copy_path_for_backup(legacy_accounts_dir, backup_dir / "legacy-accounts" / legacy_accounts_dir.name)
+
+    def import_legacy_account_candidate(self, candidate: LegacyAccountCandidate) -> str:
+        self.store.create_account(
+            candidate.target_id,
+            name=candidate.name,
+            source="imported",
+            bound_workspace=None,
+            auth_source=candidate.source / "auth.json",
+            notes="imported from legacy codex-accounts",
+        )
+        return candidate.target_id
+
+    def migrate(self, *, dry_run: bool = False, from_prefix: Optional[str] = None, from_accounts: Optional[str] = None) -> None:
+        candidates = self.scan_legacy_workspaces(from_prefix)
+        legacy_accounts_dir = Path(os.path.expandvars(os.path.expanduser(from_accounts))) if from_accounts else self.config.home_dir / ".codex-accounts"
+        reserved_ids = {candidate.account_id for candidate in candidates if candidate.account_id}
+        account_candidates = self.dedupe_legacy_account_candidates(
+            self.scan_legacy_accounts(legacy_accounts_dir),
+            set(reserved_ids),
+        )
+
+        if dry_run:
+            self.render_migration_plan(candidates, account_candidates, legacy_accounts_dir)
+            return
+
+        self.require_external_terminal("migration")
+        self.ensure_app_not_running_for_migration()
+        if self.config.active_link.exists() and not self.platform.is_directory_link(self.config.active_link):
+            self.fail(
+                f"{self.config.active_link} 是真实目录，不能由批量迁移覆盖；请使用 codex-workspaces init <name> --migrate-current 处理当前目录。",
+                f"{self.config.active_link} is a real directory and cannot be replaced by bulk migration; use codex-workspaces init <name> --migrate-current for the current directory.",
+            )
+        if not candidates and not account_candidates:
+            self.info(self.message("没有发现可迁移的旧工作区或旧账号。", "No legacy workspaces or accounts found to migrate."))
+            return
+        for candidate in candidates:
+            if candidate.target.exists():
+                self.fail(
+                    f"迁移目标已存在: {candidate.target}",
+                    f"Migration target already exists: {candidate.target}",
+                )
+
+        with self.store.lock():
+            self.store.ensure_layout()
+            backup_dir = self.migration_backup_dir()
+            self.backup_migration_sources(backup_dir, candidates, legacy_accounts_dir if account_candidates else None)
+            active_target = self.current_target().path if self.current_target().kind == "target" else None
+            active_migrated: Optional[LegacyWorkspaceCandidate] = None
+            for candidate in candidates:
+                shutil.copytree(candidate.source, candidate.target, symlinks=True)
+                try:
+                    candidate.target.chmod(0o700)
+                except OSError:
+                    pass
+                meta = self.store.ensure_workspace_meta(candidate.name, candidate.target)
+                if candidate.account_id:
+                    self.store.create_account(
+                        candidate.account_id,
+                        name=candidate.name,
+                        source="workspace-default",
+                        bound_workspace=candidate.name,
+                        auth_source=candidate.target / "auth.json",
+                        notes=f"{candidate.name} workspace default account",
+                    )
+                    meta.default_account_id = candidate.account_id
+                    meta.active_account_id = candidate.account_id
+                meta.name = candidate.name
+                meta.path = str(candidate.target)
+                meta.updated_at = iso_now()
+                self.store.write_workspace_meta(candidate.target, meta)
+                if active_target and self.same_path(active_target, candidate.source):
+                    active_migrated = candidate
+
+            imported_accounts = [self.import_legacy_account_candidate(candidate) for candidate in account_candidates]
+            link_target = active_migrated.target if active_migrated else (candidates[0].target if candidates and not self.config.active_link.exists() else None)
+            if link_target:
+                if self.platform.is_directory_link(self.config.active_link):
+                    self.platform.remove_directory_link(self.config.active_link)
+                self.platform.create_directory_link(link_target, self.config.active_link)
+            self.info(self.message(f"迁移完成，备份目录: {backup_dir}", f"Migration complete; backup directory: {backup_dir}"))
+            if candidates:
+                self.info(self.message(f"已迁移工作区: {len(candidates)}", f"Migrated workspaces: {len(candidates)}"))
+            if imported_accounts:
+                self.info(self.message(f"已导入旧账号: {len(imported_accounts)}", f"Imported legacy accounts: {len(imported_accounts)}"))
+
+    def render_migration_plan(
+        self,
+        candidates: Sequence[LegacyWorkspaceCandidate],
+        account_candidates: Sequence[LegacyAccountCandidate],
+        legacy_accounts_dir: Path,
+    ) -> None:
+        self.info(self.bold(self.message("迁移计划", "Migration plan")))
+        self.info(self.message("Will migrate:", "Will migrate:"))
+        if candidates:
+            for candidate in candidates:
+                self.info(f"  {candidate.source} -> {candidate.target}")
+        else:
+            self.info("  -")
+        self.info(self.message("Will create accounts:", "Will create accounts:"))
+        account_ids = [candidate.account_id for candidate in candidates if candidate.account_id]
+        if account_ids:
+            for account_id in account_ids:
+                self.info(f"  {account_id}")
+        else:
+            self.info("  -")
+        self.info(self.message("Will import legacy accounts:", "Will import legacy accounts:"))
+        if account_candidates:
+            for candidate in account_candidates:
+                self.info(f"  {candidate.source / 'auth.json'} -> {self.store.account_dir(candidate.target_id)}")
+        else:
+            self.info(f"  - ({legacy_accounts_dir})")
+        self.info(self.message("Will backup:", "Will backup:"))
+        if candidates or account_candidates or self.config.active_link.exists() or self.config.active_link.is_symlink():
+            self.info(f"  {self.config.active_link}")
+            for candidate in candidates:
+                self.info(f"  {candidate.source}")
+            if account_candidates:
+                self.info(f"  {legacy_accounts_dir}")
+        else:
+            self.info("  -")
+
     def switch_workspace(self, name: str, args: Sequence[str], original_argv: Sequence[str]) -> None:
         stop_first = True
         start_after = True
@@ -544,10 +791,8 @@ class WorkspaceManager:
             self.fail(f"工作区目录已存在: {directory}", f"Workspace directory already exists: {directory}")
 
         if migrate_current:
-            self.fail(
-                "迁移功能将在后续阶段实现；本阶段只创建空工作区。",
-                "Migration will be implemented in a later phase; this phase only initializes empty workspaces.",
-            )
+            self.migrate_current_workspace(clean_name, directory)
+            return
 
         self.store.ensure_layout()
         directory.mkdir(parents=True, exist_ok=False)
@@ -557,6 +802,49 @@ class WorkspaceManager:
             pass
         self.store.ensure_workspace_meta(clean_name, directory)
         self.info(self.message(f"已初始化工作区目录: {directory}", f"Initialized workspace directory: {directory}"))
+
+    def migrate_current_workspace(self, clean_name: str, directory: Path) -> None:
+        self.require_external_terminal("migration")
+        self.ensure_app_not_running_for_migration()
+        active = self.config.active_link
+        if not active.exists() or self.platform.is_directory_link(active):
+            self.fail(
+                f"{active} 不是可迁移的真实目录。",
+                f"{active} is not a real directory that can be migrated.",
+            )
+        if not active.is_dir():
+            self.fail(f"{active} 不是目录。", f"{active} is not a directory.")
+
+        with self.store.lock():
+            self.store.ensure_layout()
+            backup_dir = self.migration_backup_dir()
+            self.copy_path_for_backup(active, backup_dir / "codex")
+            shutil.move(str(active), str(directory))
+            try:
+                directory.chmod(0o700)
+            except OSError:
+                pass
+            meta = self.store.ensure_workspace_meta(clean_name, directory)
+            auth_path = directory / "auth.json"
+            if auth_path.is_file():
+                account_id = self.unique_account_id("acct_" + clean_name, directory)
+                self.store.create_account(
+                    account_id,
+                    name=clean_name,
+                    source="workspace-default",
+                    bound_workspace=clean_name,
+                    auth_source=auth_path,
+                    notes=f"{clean_name} workspace default account",
+                )
+                meta.default_account_id = account_id
+                meta.active_account_id = account_id
+            meta.name = clean_name
+            meta.path = str(directory)
+            meta.updated_at = iso_now()
+            meta.last_used_at = iso_now()
+            self.store.write_workspace_meta(directory, meta)
+            self.platform.create_directory_link(directory, active)
+        self.info(self.message(f"已迁移当前工作区: {clean_name} -> {directory}", f"Migrated current workspace: {clean_name} -> {directory}"))
 
     def rename_workspace(self, old_name: str, new_name: str) -> None:
         old_clean = strip_workspace_name(old_name)
@@ -816,6 +1104,55 @@ class WorkspaceManager:
             self.store.write_account_meta(account_meta)
         self.info(self.message(f"已设置默认账号: {clean_name} -> {account_id}", f"Set default account: {clean_name} -> {account_id}"))
 
+    def accounts_import_workspaces(self) -> None:
+        self.store.ensure_layout()
+        imported: list[str] = []
+        with self.store.lock():
+            for directory in self.workspace_dirs():
+                name = strip_workspace_name(str(directory))
+                try:
+                    validate_workspace_name(name)
+                except CodexWorkspacesError:
+                    continue
+                auth_path = directory / "auth.json"
+                if not auth_path.is_file():
+                    continue
+                meta = self.store.ensure_workspace_meta(name, directory)
+                if meta.default_account_id and self.store.account_auth_path(meta.default_account_id).is_file():
+                    continue
+                account_id = self.unique_account_id("acct_" + name, directory)
+                self.store.create_account(
+                    account_id,
+                    name=name,
+                    source="workspace-default",
+                    bound_workspace=name,
+                    auth_source=auth_path,
+                    notes=f"{name} workspace default account",
+                )
+                meta.default_account_id = account_id
+                meta.active_account_id = account_id
+                meta.updated_at = iso_now()
+                self.store.write_workspace_meta(directory, meta)
+                imported.append(account_id)
+        self.info(self.message(f"已导入工作区默认账号: {len(imported)}", f"Imported workspace default accounts: {len(imported)}"))
+        for account_id in imported:
+            self.info(f"  {account_id}")
+
+    def accounts_import_legacy(self, legacy_accounts_dir: str) -> None:
+        self.store.ensure_layout()
+        source_dir = Path(os.path.expandvars(os.path.expanduser(legacy_accounts_dir)))
+        candidates = self.scan_legacy_accounts(source_dir)
+        if not candidates:
+            self.info(self.message("没有发现可导入的旧账号。", "No legacy accounts found to import."))
+            return
+        imported: list[str] = []
+        with self.store.lock():
+            for candidate in candidates:
+                imported.append(self.import_legacy_account_candidate(candidate))
+        self.info(self.message(f"已导入旧账号: {len(imported)}", f"Imported legacy accounts: {len(imported)}"))
+        for account_id in imported:
+            self.info(f"  {account_id}")
+
     def note_workspace(self, name: str, args: Sequence[str]) -> None:
         clean_name = strip_workspace_name(name)
         validate_workspace_name(clean_name)
@@ -946,15 +1283,23 @@ def usage(lang: str) -> str:
   codex-workspaces restart [--force]
       重启 Codex App。当前仅支持 macOS。
 
-  codex-workspaces init <工作区名>
+  codex-workspaces init <工作区名> [--migrate-current]
       初始化新的工作区目录 ~/.codex-workspaces/workspaces/<工作区名>。
+      --migrate-current 会把当前真实 ~/.codex 目录迁移成该工作区。
+
+  codex-workspaces migrate [--dry-run] [--from-prefix 路径] [--from-accounts 路径]
+      迁移旧 ~/.codex-<工作区名> 目录，并可导入旧 ~/.codex-accounts。
 
   codex-workspaces accounts list
   codex-workspaces accounts current
+  codex-workspaces accounts info <账号>
+  codex-workspaces accounts init <账号>
   codex-workspaces accounts save <账号>
   codex-workspaces accounts use <账号>
   codex-workspaces accounts restore-default [工作区]
   codex-workspaces accounts set-default <工作区> <账号> [--activate]
+  codex-workspaces accounts import-workspaces
+  codex-workspaces accounts import-legacy <旧账号目录>
       管理 auth.json 账号快照。accounts use 是临时切换，不修改工作区默认账号。
 
   codex-workspaces rename <旧工作区名> <新工作区名>
@@ -1016,15 +1361,23 @@ Usage:
   codex-workspaces restart [--force]
       Restart Codex App. Currently supported on macOS only.
 
-  codex-workspaces init <workspace>
+  codex-workspaces init <workspace> [--migrate-current]
       Initialize a new workspace directory under ~/.codex-workspaces/workspaces/.
+      --migrate-current migrates the current real ~/.codex directory into that workspace.
+
+  codex-workspaces migrate [--dry-run] [--from-prefix path] [--from-accounts path]
+      Migrate legacy ~/.codex-<workspace> directories and optionally import old ~/.codex-accounts.
 
   codex-workspaces accounts list
   codex-workspaces accounts current
+  codex-workspaces accounts info <account>
+  codex-workspaces accounts init <account>
   codex-workspaces accounts save <account>
   codex-workspaces accounts use <account>
   codex-workspaces accounts restore-default [workspace]
   codex-workspaces accounts set-default <workspace> <account> [--activate]
+  codex-workspaces accounts import-workspaces
+  codex-workspaces accounts import-legacy <legacy-accounts-dir>
       Manage auth.json account snapshots. accounts use is temporary and does not change the workspace default account.
 
   codex-workspaces rename <old-workspace> <new-workspace>
