@@ -8,6 +8,13 @@ This project follows a simple changelog format while it is still pre-release.
 
 ### Added
 
+- Added the cross-platform Python 3 package with the `codex-accounts` console script.
+- Added Linux/macOS symlink switching and Windows symlink/junction support.
+- Added Python unit tests for account validation, creation, migration, switching, CLI dispatch, and platform safety behavior.
+- Added `pyproject.toml`, package metadata, editable install support, and PyPI-ready build configuration.
+- Added GitHub Actions CI for Linux, macOS, Windows, and Python 3.9/3.11/3.13.
+- Added GitHub Actions Trusted Publishing workflow for PyPI releases.
+- Added design, testing, and release documentation under `docs/`.
 - Added the `codex-accounts` macOS shell script for managing multiple Codex account directories.
 - Added account listing with active account detection.
 - Added current account inspection.
