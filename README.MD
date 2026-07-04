@@ -1,6 +1,6 @@
 # codex-account
 
-English | [Simplified Chinese](README.zh-CN.md)
+English | [Simplified Chinese](README.zh-CN.md) | [Changelog](CHANGELOG.md)
 
 `codex-account` is a small macOS shell utility for switching between multiple Codex app accounts. It keeps each account in its own `~/.codex-<name>` directory and makes the active `~/.codex` path point to the selected account with a symlink.
 

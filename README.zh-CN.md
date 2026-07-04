@@ -1,6 +1,6 @@
 # codex-account
 
-[English](README.MD) | 简体中文
+[English](README.MD) | 简体中文 | [更新日志](CHANGELOG.md)
 
 `codex-account` 是一个 macOS Shell 小工具，用来管理和切换多个 Codex App 账号。它会把每个账号保存在独立的 `~/.codex-<账号名>` 目录中，并让当前生效的 `~/.codex` 通过软链接指向选中的账号目录。
 
