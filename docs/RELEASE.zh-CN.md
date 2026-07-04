@@ -89,7 +89,7 @@ permissions:
 2. 本地执行测试和构建检查。
 3. 合并到 `main`。
 4. 手动运行 `Publish to TestPyPI`，确认 TestPyPI 上传和安装正常。
-5. 创建 Git tag，例如 `v0.1.0`。
+5. 创建 Git tag，例如 `v0.2.0`。
 6. 在 GitHub 创建 Release。
 7. Release 发布后，`Publish to PyPI` workflow 自动构建并发布。
 8. 在 PyPI 页面确认 wheel、sdist 和 README 渲染正常。
