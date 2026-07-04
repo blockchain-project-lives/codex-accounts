@@ -1,0 +1,644 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+APP_NAME="${CODEX_APP_NAME:-Codex}"
+HOME_DIR="${HOME:?HOME is not set}"
+ACTIVE_LINK="${CODEX_ACCOUNT_LINK:-$HOME_DIR/.codex}"
+ACCOUNT_PREFIX="${CODEX_ACCOUNT_PREFIX:-$HOME_DIR/.codex-}"
+QUIT_TIMEOUT="${CODEX_QUIT_TIMEOUT:-20}"
+
+detect_ui_lang() {
+  local forced="${CODEX_ACCOUNT_LANG:-}"
+  local apple_lang=""
+  local env_lang=""
+
+  case "$forced" in
+    zh|zh-*|zh_*|ZH|ZH-*|ZH_*) printf 'zh\n'; return 0 ;;
+    en|en-*|en_*|EN|EN-*|EN_*) printf 'en\n'; return 0 ;;
+  esac
+
+  if command -v defaults >/dev/null 2>&1; then
+    apple_lang="$(defaults read -g AppleLanguages 2>/dev/null | awk -F'"' '/"/ {print $2; exit}' || true)"
+  fi
+
+  case "$apple_lang" in
+    zh|zh-*|zh_*|ZH|ZH-*|ZH_*) printf 'zh\n'; return 0 ;;
+    ?*) printf 'en\n'; return 0 ;;
+  esac
+
+  env_lang="${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}"
+  case "$env_lang" in
+    zh|zh-*|zh_*|ZH|ZH-*|ZH_*) printf 'zh\n' ;;
+    *) printf 'en\n' ;;
+  esac
+}
+
+UI_LANG="$(detect_ui_lang)"
+
+is_zh() {
+  [ "$UI_LANG" = "zh" ]
+}
+
+bold() {
+  if [ -t 1 ]; then printf '\033[1m%s\033[0m' "$*"; else printf '%s' "$*"; fi
+}
+
+info() {
+  printf '%s\n' "$*"
+}
+
+err() {
+  if is_zh; then
+    printf '错误: %s\n' "$*" >&2
+  else
+    printf 'Error: %s\n' "$*" >&2
+  fi
+}
+
+die() {
+  err "$*"
+  exit 1
+}
+
+usage() {
+  if is_zh; then
+  cat <<'USAGE'
+codex-account - Codex 多账号切换工具
+
+账号约定:
+  当前账号: ~/.codex                 软链接
+  账号目录: ~/.codex-work            账号名 work
+            ~/.codex-personal        账号名 personal
+
+用法:
+  codex-account list | ls
+      查看所有账号目录，并标出当前账号。
+
+  codex-account current
+      显示当前 ~/.codex 指向哪个账号。
+
+  codex-account use <账号名> [--no-stop] [--no-start] [--force]
+  codex-account switch <账号名> [--no-stop] [--no-start] [--force]
+  codex-account <账号名>
+      关闭 Codex App -> 切换 ~/.codex 软链接 -> 启动 Codex App。
+      例如: codex-account work
+            codex-account personal --no-start
+
+  codex-account stop [--force]
+      关闭 Codex App。默认优雅退出；--force 会在超时后 killall。
+
+  codex-account start
+      启动 Codex App。
+
+  codex-account restart [--force]
+      重启 Codex App。
+
+  codex-account create <账号名> [--migrate-current]
+      创建新的账号目录 ~/.codex-<账号名>。
+      加 --migrate-current 可将已有的真实 ~/.codex 目录迁移为该账号。
+
+  codex-account install [目录]
+      安装本脚本到 PATH 目录。默认优先选择已有 PATH 中可写的目录。
+
+  codex-account help
+      显示帮助。
+
+环境变量:
+  CODEX_APP_NAME       App 名称，默认 Codex
+  CODEX_QUIT_TIMEOUT   等待 App 退出秒数，默认 20
+  CODEX_ACCOUNT_LINK   当前账号链接，默认 ~/.codex
+  CODEX_ACCOUNT_PREFIX 账号目录前缀，默认 ~/.codex-
+  CODEX_ACCOUNT_LANG   强制提示语言，可设为 zh 或 en
+USAGE
+  else
+  cat <<'USAGE'
+codex-account - Codex multi-account switcher
+
+Account layout:
+  Active account: ~/.codex                 symlink
+  Account dirs:   ~/.codex-work            account name: work
+                  ~/.codex-personal        account name: personal
+
+Usage:
+  codex-account list | ls
+      List all account directories and mark the active account.
+
+  codex-account current
+      Show where ~/.codex currently points.
+
+  codex-account use <account> [--no-stop] [--no-start] [--force]
+  codex-account switch <account> [--no-stop] [--no-start] [--force]
+  codex-account <account>
+      Quit Codex App -> switch the ~/.codex symlink -> start Codex App.
+      Examples: codex-account work
+                codex-account personal --no-start
+
+  codex-account stop [--force]
+      Quit Codex App. By default this asks the app to quit gracefully;
+      --force runs killall if the app does not exit before the timeout.
+
+  codex-account start
+      Start Codex App.
+
+  codex-account restart [--force]
+      Restart Codex App.
+
+  codex-account create <account> [--migrate-current]
+      Create a new account directory ~/.codex-<account>.
+      Add --migrate-current to migrate an existing real ~/.codex directory
+      into this account.
+
+  codex-account install [directory]
+      Install this script into a PATH directory. By default it chooses
+      a writable directory that is already in PATH when possible.
+
+  codex-account help
+      Show this help.
+
+Environment variables:
+  CODEX_APP_NAME       App name, default: Codex
+  CODEX_QUIT_TIMEOUT   Seconds to wait for app exit, default: 20
+  CODEX_ACCOUNT_LINK   Active account link, default: ~/.codex
+  CODEX_ACCOUNT_PREFIX Account directory prefix, default: ~/.codex-
+  CODEX_ACCOUNT_LANG   Force output language: zh or en
+USAGE
+  fi
+}
+
+strip_account_name() {
+  local name="$1"
+  name="${name##*/}"
+  name="${name#.codex-}"
+  printf '%s\n' "$name"
+}
+
+validate_account_name() {
+  local name="$1"
+  if [ -z "$name" ]; then
+    if is_zh; then die "账号名不能为空"; else die "Account name cannot be empty"; fi
+  fi
+  case "$name" in
+    *[!A-Za-z0-9._-]*)
+      if is_zh; then
+        die "账号名只能包含字母、数字、点、下划线和连字符: $name"
+      else
+        die "Account name can only contain letters, numbers, dots, underscores, and hyphens: $name"
+      fi
+      ;;
+    .|..)
+      if is_zh; then die "账号名不能是 $name"; else die "Account name cannot be $name"; fi
+      ;;
+  esac
+}
+
+account_dir() {
+  local name
+  name="$(strip_account_name "$1")"
+  validate_account_name "$name"
+  printf '%s%s\n' "$ACCOUNT_PREFIX" "$name"
+}
+
+real_dir() {
+  local path="$1"
+  local target
+
+  if [ -L "$path" ]; then
+    target="$(readlink "$path")"
+    case "$target" in
+      /*) path="$target" ;;
+      *) path="$(cd "$(dirname "$path")" >/dev/null 2>&1 && pwd -P)/$target" ;;
+    esac
+  fi
+
+  if [ -d "$path" ]; then
+    (cd "$path" >/dev/null 2>&1 && pwd -P)
+  else
+    printf '%s\n' "$path"
+  fi
+}
+
+current_target() {
+  if [ -L "$ACTIVE_LINK" ]; then
+    real_dir "$ACTIVE_LINK"
+  elif [ -e "$ACTIVE_LINK" ]; then
+    printf 'not-a-symlink:%s\n' "$ACTIVE_LINK"
+  else
+    printf 'missing\n'
+  fi
+}
+
+current_name() {
+  local target="$1"
+  local dir name dir_real
+
+  for dir in "$ACCOUNT_PREFIX"*; do
+    [ -d "$dir" ] || continue
+    dir_real="$(real_dir "$dir")"
+    if [ "$dir_real" = "$target" ]; then
+      name="$(strip_account_name "$dir")"
+      printf '%s\n' "$name"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+list_accounts() {
+  local found=0
+  local target name dir dir_real marker
+
+  target="$(current_target)"
+
+  if is_zh; then
+    printf '%s\n' "$(bold 'Codex 账号')"
+  else
+    printf '%s\n' "$(bold 'Codex accounts')"
+  fi
+  for dir in "$ACCOUNT_PREFIX"*; do
+    [ -d "$dir" ] || continue
+    found=1
+    name="$(strip_account_name "$dir")"
+    dir_real="$(real_dir "$dir")"
+    marker=' '
+    if [ "$dir_real" = "$target" ]; then
+      marker='*'
+    fi
+    printf ' %s %-16s %s\n' "$marker" "$name" "$dir"
+  done
+
+  if [ "$found" -eq 0 ]; then
+    if is_zh; then
+      info "未找到账号目录。可以先执行: codex-account create work"
+    else
+      info "No account directories found. You can create one with: codex-account create work"
+    fi
+  fi
+
+  case "$target" in
+    missing)
+      info
+      if is_zh; then
+        info "当前 $ACTIVE_LINK 不存在。"
+      else
+        info "Current $ACTIVE_LINK does not exist."
+      fi
+      ;;
+    not-a-symlink:*)
+      info
+      if is_zh; then
+        info "当前 $ACTIVE_LINK 存在，但不是软链接，切换前需要手动处理。"
+      else
+        info "Current $ACTIVE_LINK exists, but it is not a symlink. Please handle it manually before switching."
+      fi
+      ;;
+    *)
+      if name="$(current_name "$target" 2>/dev/null)"; then
+        info
+        if is_zh; then
+          info "当前账号: $name -> $target"
+        else
+          info "Current account: $name -> $target"
+        fi
+      else
+        info
+        if is_zh; then
+          info "当前账号: 未匹配到账号目录 -> $target"
+        else
+          info "Current account: no matching account directory -> $target"
+        fi
+      fi
+      ;;
+  esac
+}
+
+show_current() {
+  local target name
+  target="$(current_target)"
+  case "$target" in
+    missing)
+      if is_zh; then die "$ACTIVE_LINK 不存在"; else die "$ACTIVE_LINK does not exist"; fi
+      ;;
+    not-a-symlink:*)
+      if is_zh; then die "$ACTIVE_LINK 存在，但不是软链接"; else die "$ACTIVE_LINK exists, but it is not a symlink"; fi
+      ;;
+    *)
+      if name="$(current_name "$target" 2>/dev/null)"; then
+        info "$name -> $target"
+      else
+        info "unknown -> $target"
+      fi
+      ;;
+  esac
+}
+
+app_running() {
+  pgrep -x "$APP_NAME" >/dev/null 2>&1
+}
+
+stop_codex() {
+  local force="${1:-0}"
+  local waited=0
+
+  if ! app_running; then
+    if is_zh; then info "$APP_NAME 未运行。"; else info "$APP_NAME is not running."; fi
+    return 0
+  fi
+
+  if is_zh; then info "正在关闭 $APP_NAME ..."; else info "Quitting $APP_NAME ..."; fi
+  osascript -e "tell application \"$APP_NAME\" to quit" >/dev/null 2>&1 || true
+
+  while app_running && [ "$waited" -lt "$QUIT_TIMEOUT" ]; do
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  if app_running; then
+    if [ "$force" = "1" ]; then
+      if is_zh; then
+        info "$APP_NAME 未在 ${QUIT_TIMEOUT}s 内退出，执行强制关闭。"
+      else
+        info "$APP_NAME did not exit within ${QUIT_TIMEOUT}s; forcing it to quit."
+      fi
+      killall "$APP_NAME" >/dev/null 2>&1 || true
+      sleep 1
+    else
+      if is_zh; then
+        die "$APP_NAME 未在 ${QUIT_TIMEOUT}s 内退出；可加 --force 强制关闭"
+      else
+        die "$APP_NAME did not exit within ${QUIT_TIMEOUT}s; add --force to force quit"
+      fi
+    fi
+  fi
+
+  if is_zh; then info "$APP_NAME 已关闭。"; else info "$APP_NAME has quit."; fi
+}
+
+start_codex() {
+  if is_zh; then info "正在启动 $APP_NAME ..."; else info "Starting $APP_NAME ..."; fi
+  open -a "$APP_NAME"
+}
+
+restart_codex() {
+  local force="$1"
+  stop_codex "$force"
+  start_codex
+}
+
+switch_account() {
+  local name="$1"
+  shift || true
+
+  local stop_first=1
+  local start_after=1
+  local force=0
+  local dir
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --no-stop) stop_first=0 ;;
+      --no-start) start_after=0 ;;
+      --force|-f) force=1 ;;
+      -h|--help)
+        usage
+        return 0
+        ;;
+      *)
+        if is_zh; then die "未知参数: $1"; else die "Unknown option: $1"; fi
+        ;;
+    esac
+    shift
+  done
+
+  name="$(strip_account_name "$name")"
+  validate_account_name "$name"
+  dir="$(account_dir "$name")"
+  if [ ! -d "$dir" ]; then
+    if is_zh; then
+      die "账号不存在: $dir。可先执行: codex-account create $name"
+    else
+      die "Account does not exist: $dir. You can create it with: codex-account create $name"
+    fi
+  fi
+
+  if [ -e "$ACTIVE_LINK" ] && [ ! -L "$ACTIVE_LINK" ]; then
+    if is_zh; then
+      die "$ACTIVE_LINK 已存在但不是软链接。为避免误删，请先手动备份/迁移它。"
+    else
+      die "$ACTIVE_LINK already exists but is not a symlink. Please back it up or migrate it manually before switching."
+    fi
+  fi
+
+  if [ "$stop_first" -eq 1 ]; then
+    stop_codex "$force"
+  fi
+
+  if [ -L "$ACTIVE_LINK" ]; then
+    rm "$ACTIVE_LINK"
+  fi
+  ln -s "$dir" "$ACTIVE_LINK"
+
+  if is_zh; then info "已切换到: $name -> $dir"; else info "Switched to: $name -> $dir"; fi
+
+  if [ "$start_after" -eq 1 ]; then
+    start_codex
+  fi
+}
+
+create_account() {
+  local name="${1:-}"
+  local dir
+  local migrate_current=0
+
+  if [ "$#" -gt 0 ]; then
+    shift
+  fi
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --migrate-current|--migrate)
+        migrate_current=1
+        ;;
+      -h|--help)
+        usage
+        return 0
+        ;;
+      *)
+        if is_zh; then die "未知参数: $1"; else die "Unknown option: $1"; fi
+        ;;
+    esac
+    shift
+  done
+
+  if [ -z "$name" ]; then
+    if is_zh; then die "缺少账号名，例如: codex-account create work"; else die "Missing account name, for example: codex-account create work"; fi
+  fi
+  name="$(strip_account_name "$name")"
+  validate_account_name "$name"
+  dir="$(account_dir "$name")"
+
+  if [ -e "$dir" ]; then
+    if is_zh; then die "账号目录已存在: $dir"; else die "Account directory already exists: $dir"; fi
+  fi
+
+  if [ "$migrate_current" -eq 1 ]; then
+    if [ -L "$ACTIVE_LINK" ]; then
+      if is_zh; then
+        die "$ACTIVE_LINK 已经是软链接，无需迁移。"
+      else
+        die "$ACTIVE_LINK is already a symlink; there is nothing to migrate."
+      fi
+    fi
+    if [ ! -e "$ACTIVE_LINK" ]; then
+      if is_zh; then
+        die "$ACTIVE_LINK 不存在，无法迁移。"
+      else
+        die "$ACTIVE_LINK does not exist, so it cannot be migrated."
+      fi
+    fi
+    if [ ! -d "$ACTIVE_LINK" ]; then
+      if is_zh; then
+        die "$ACTIVE_LINK 存在但不是目录，无法迁移。"
+      else
+        die "$ACTIVE_LINK exists but is not a directory, so it cannot be migrated."
+      fi
+    fi
+
+    mkdir -p "$(dirname "$dir")"
+    mv "$ACTIVE_LINK" "$dir"
+    ln -s "$dir" "$ACTIVE_LINK"
+    if is_zh; then
+      info "已迁移当前账号: $ACTIVE_LINK -> $dir"
+    else
+      info "Migrated current account: $ACTIVE_LINK -> $dir"
+    fi
+  else
+    mkdir -p "$dir"
+    if is_zh; then info "已创建账号目录: $dir"; else info "Created account directory: $dir"; fi
+  fi
+}
+
+path_contains_dir() {
+  local dir="$1"
+  case ":$PATH:" in
+    *":$dir:"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+default_install_dir() {
+  local dir
+  for dir in "$HOME_DIR/.local/bin" "$HOME_DIR/bin" "/opt/homebrew/bin" "/usr/local/bin"; do
+    if path_contains_dir "$dir" && [ -d "$dir" ] && [ -w "$dir" ]; then
+      printf '%s\n' "$dir"
+      return 0
+    fi
+  done
+  for dir in "/opt/homebrew/bin" "/usr/local/bin" "$HOME_DIR/.local/bin"; do
+    if path_contains_dir "$dir" || [ "$dir" = "$HOME_DIR/.local/bin" ]; then
+      printf '%s\n' "$dir"
+      return 0
+    fi
+  done
+}
+
+install_self() {
+  local dest="${1:-}"
+  local self="${BASH_SOURCE[0]}"
+
+  if [ -z "$dest" ]; then
+    dest="$(default_install_dir)"
+  fi
+  if [ -z "$dest" ]; then
+    if is_zh; then
+      die "无法判断安装目录，请指定，例如: codex-account install /usr/local/bin"
+    else
+      die "Could not choose an install directory. Please specify one, for example: codex-account install /usr/local/bin"
+    fi
+  fi
+
+  mkdir -p "$dest"
+  install -m 0755 "$self" "$dest/codex-account"
+  if is_zh; then info "已安装: $dest/codex-account"; else info "Installed: $dest/codex-account"; fi
+
+  if ! path_contains_dir "$dest"; then
+    if is_zh; then
+      info "提醒: $dest 目前不在 PATH 中，需要加入 shell 配置。"
+    else
+      info "Note: $dest is not currently in PATH. Add it to your shell config before using the command directly."
+    fi
+  fi
+}
+
+main() {
+  local cmd="${1:-help}"
+  shift || true
+
+  case "$cmd" in
+    help|-h|--help)
+      usage
+      ;;
+    list|ls)
+      list_accounts
+      ;;
+    current|whoami)
+      show_current
+      ;;
+    use|switch|sw)
+      if [ "$#" -lt 1 ]; then
+        if is_zh; then die "缺少账号名，例如: codex-account use work"; else die "Missing account name, for example: codex-account use work"; fi
+      fi
+      switch_account "$@"
+      ;;
+    stop|quit|close)
+      local force=0
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --force|-f) force=1 ;;
+          *) if is_zh; then die "未知参数: $1"; else die "Unknown option: $1"; fi ;;
+        esac
+        shift
+      done
+      stop_codex "$force"
+      ;;
+    start|open)
+      if [ "$#" -ne 0 ]; then
+        if is_zh; then die "start 不需要参数"; else die "start does not take arguments"; fi
+      fi
+      start_codex
+      ;;
+    restart|reopen)
+      local force=0
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --force|-f) force=1 ;;
+          *) if is_zh; then die "未知参数: $1"; else die "Unknown option: $1"; fi ;;
+        esac
+        shift
+      done
+      restart_codex "$force"
+      ;;
+    create|new)
+      create_account "$@"
+      ;;
+    install)
+      install_self "${1:-}"
+      ;;
+    *)
+      if [ -d "$(account_dir "$cmd" 2>/dev/null || true)" ]; then
+        switch_account "$cmd" "$@"
+      else
+        if is_zh; then
+          err "未知命令或账号不存在: $cmd"
+        else
+          err "Unknown command or account does not exist: $cmd"
+        fi
+        info
+        usage
+        exit 1
+      fi
+      ;;
+  esac
+}
+
+main "$@"
