@@ -6,6 +6,8 @@ English | [Simplified Chinese](README.zh-CN.md) | [Changelog](CHANGELOG.md)
 
 It can gracefully quit the Codex app, switch the account link, and start Codex again in one command.
 
+For safety, commands that stop, start, restart, switch, or migrate accounts must be run from an external system Terminal, not from the built-in Codex terminal.
+
 ## Features
 
 - Manage multiple Codex account directories, such as `~/.codex-work` and `~/.codex-personal`.
@@ -14,6 +16,7 @@ It can gracefully quit the Codex app, switch the account link, and start Codex a
 - List accounts and show the current account.
 - Create new account directories.
 - Migrate an existing first-time `~/.codex` directory into a named account.
+- Refuse lifecycle, switch, and migration commands when they are run inside a detected Codex terminal.
 - English and Chinese command output, auto-detected from the system language or forced with `CODEX_ACCOUNT_LANG`.
 
 ## Requirements
@@ -56,7 +59,7 @@ You can customize the active link and account directory prefix with environment 
 
 If you already have a real `~/.codex` directory, migrate it into the account layout before switching:
 
-First quit Codex from an external Terminal window:
+First open an external system Terminal window and quit Codex:
 
 ```bash
 codex-account stop
@@ -71,6 +74,8 @@ codex-account create personal --migrate-current
 This moves the existing `~/.codex` directory to `~/.codex-personal`, then creates a new `~/.codex` symlink pointing to it.
 
 The migration command refuses to run while the Codex app is still running. If it cannot confirm whether Codex is running, it refuses to migrate as well. This avoids moving configuration files while the app may still be reading or writing them.
+
+Do not run migration from the built-in Codex terminal. The script checks common Codex environment markers, such as `CODEX_SHELL`, `CODEX_SANDBOX`, `CODEX_THREAD_ID`, and the Codex app bundle identifier, and blocks migration when those markers are present.
 
 Then create another account directory when needed:
 
@@ -87,6 +92,8 @@ codex-account work
 If `~/.codex` exists and is not a symlink, `codex-account` refuses to switch accounts so it does not accidentally remove your existing data.
 
 ## Usage
+
+Run lifecycle, switch, and migration commands from an external system Terminal. The built-in Codex terminal is only appropriate for safe read-only commands such as `list` and `current`, or for creating an empty account directory.
 
 List accounts:
 
@@ -173,6 +180,7 @@ CODEX_APP_NAME="Codex" codex-account restart
 ## Notes
 
 - Account names may contain letters, numbers, dots, underscores, and hyphens.
+- `stop`, `start`, `restart`, `switch`, and `create <account> --migrate-current` are blocked when the script detects a Codex terminal environment.
 - `create <account> --migrate-current` only works when Codex is confirmed not running, `~/.codex` exists as a real directory, and `~/.codex-<account>` does not already exist.
 - Switching removes and recreates only the `~/.codex` symlink.
 - Account directories such as `~/.codex-work` are not deleted by switch commands.

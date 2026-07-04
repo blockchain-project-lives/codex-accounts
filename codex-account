@@ -81,22 +81,27 @@ codex-account - Codex 多账号切换工具
   codex-account switch <账号名> [--no-stop] [--no-start] [--force]
   codex-account <账号名>
       关闭 Codex App -> 切换 ~/.codex 软链接 -> 启动 Codex App。
+      不能在 Codex 内置 Terminal 中执行。
       例如: codex-account work
             codex-account personal --no-start
 
   codex-account stop [--force]
       关闭 Codex App。默认优雅退出；--force 会在超时后 killall。
+      不能在 Codex 内置 Terminal 中执行。
 
   codex-account start
       启动 Codex App。
+      不能在 Codex 内置 Terminal 中执行。
 
   codex-account restart [--force]
       重启 Codex App。
+      不能在 Codex 内置 Terminal 中执行。
 
   codex-account create <账号名> [--migrate-current]
       创建新的账号目录 ~/.codex-<账号名>。
       加 --migrate-current 可将已有的真实 ~/.codex 目录迁移为该账号。
-      为避免配置损坏，迁移前必须先从外部 Terminal 关闭 Codex App。
+      迁移不能在 Codex 内置 Terminal 中执行，且迁移前必须先从外部
+      Terminal 关闭 Codex App。
 
   codex-account install [目录]
       安装本脚本到 PATH 目录。默认优先选择已有 PATH 中可写的目录。
@@ -131,25 +136,29 @@ Usage:
   codex-account switch <account> [--no-stop] [--no-start] [--force]
   codex-account <account>
       Quit Codex App -> switch the ~/.codex symlink -> start Codex App.
+      Must not be run from the built-in Codex terminal.
       Examples: codex-account work
                 codex-account personal --no-start
 
   codex-account stop [--force]
       Quit Codex App. By default this asks the app to quit gracefully;
       --force runs killall if the app does not exit before the timeout.
+      Must not be run from the built-in Codex terminal.
 
   codex-account start
       Start Codex App.
+      Must not be run from the built-in Codex terminal.
 
   codex-account restart [--force]
       Restart Codex App.
+      Must not be run from the built-in Codex terminal.
 
   codex-account create <account> [--migrate-current]
       Create a new account directory ~/.codex-<account>.
       Add --migrate-current to migrate an existing real ~/.codex directory
       into this account.
-      To avoid corrupting config files, quit Codex App from an external
-      terminal before migration.
+      Migration must not be run from the built-in Codex terminal, and you
+      must quit Codex App from an external terminal before migration.
 
   codex-account install [directory]
       Install this script into a PATH directory. By default it chooses
@@ -339,6 +348,43 @@ app_running() {
   pgrep -x "$APP_NAME" >/dev/null 2>&1
 }
 
+in_codex_terminal() {
+  case "${CODEX_SHELL:-}" in
+    1|true|TRUE|yes|YES) return 0 ;;
+  esac
+  [ -n "${CODEX_THREAD_ID:-}" ] && return 0
+  [ -n "${CODEX_SANDBOX:-}" ] && return 0
+  [ -n "${CODEX_CI:-}" ] && return 0
+  case "${CODEX_INTERNAL_ORIGINATOR_OVERRIDE:-}" in
+    *Codex*|*codex*) return 0 ;;
+  esac
+  case "${__CFBundleIdentifier:-}" in
+    com.openai.codex*) return 0 ;;
+  esac
+  return 1
+}
+
+require_external_terminal() {
+  local action="$1"
+  local action_zh="$action"
+
+  case "$action" in
+    stop) action_zh="关闭 Codex" ;;
+    start) action_zh="启动 Codex" ;;
+    restart) action_zh="重启 Codex" ;;
+    switch) action_zh="切换账号" ;;
+    migration) action_zh="迁移账号目录" ;;
+  esac
+
+  if in_codex_terminal; then
+    if is_zh; then
+      die "不能在 Codex 内置 Terminal 中执行${action_zh}。请打开外部系统 Terminal，在 Codex 外部运行该命令。"
+    else
+      die "Cannot run $action from the built-in Codex terminal. Open an external system Terminal and run this command outside Codex."
+    fi
+  fi
+}
+
 ensure_app_not_running_for_migration() {
   local status
 
@@ -379,6 +425,8 @@ stop_codex() {
   local force="${1:-0}"
   local waited=0
 
+  require_external_terminal "stop"
+
   if ! app_running; then
     if is_zh; then info "$APP_NAME 未运行。"; else info "$APP_NAME is not running."; fi
     return 0
@@ -414,12 +462,14 @@ stop_codex() {
 }
 
 start_codex() {
+  require_external_terminal "start"
   if is_zh; then info "正在启动 $APP_NAME ..."; else info "Starting $APP_NAME ..."; fi
   open -a "$APP_NAME"
 }
 
 restart_codex() {
   local force="$1"
+  require_external_terminal "restart"
   stop_codex "$force"
   start_codex
 }
@@ -448,6 +498,8 @@ switch_account() {
     esac
     shift
   done
+
+  require_external_terminal "switch"
 
   name="$(strip_account_name "$name")"
   validate_account_name "$name"
@@ -521,6 +573,7 @@ create_account() {
   fi
 
   if [ "$migrate_current" -eq 1 ]; then
+    require_external_terminal "migration"
     ensure_app_not_running_for_migration
     if [ -L "$ACTIVE_LINK" ]; then
       if is_zh; then

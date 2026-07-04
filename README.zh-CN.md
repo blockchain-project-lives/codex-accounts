@@ -6,6 +6,8 @@
 
 切换账号时，它可以自动关闭 Codex App、切换 `~/.codex` 软链接，然后重新启动 Codex App。
 
+出于安全考虑，关闭、启动、重启、切换账号和迁移账号目录这些命令必须在外部系统 Terminal 中执行，不能在 Codex 内置 Terminal 中执行。
+
 ## 功能
 
 - 管理多个 Codex 账号目录，例如 `~/.codex-work` 和 `~/.codex-personal`。
@@ -14,6 +16,7 @@
 - 查看账号列表和当前账号。
 - 创建新的账号目录。
 - 将首次使用时已有的 `~/.codex` 真实目录迁移成指定账号。
+- 在检测到 Codex 内置 Terminal 环境时，拒绝执行生命周期、切换和迁移命令。
 - 支持英文和中文命令输出，可根据系统语言自动判断，也可通过 `CODEX_ACCOUNT_LANG` 强制指定。
 
 ## 要求
@@ -56,7 +59,7 @@ tmp="$(mktemp -t codex-account.XXXXXX)" && curl -fsSL https://raw.githubusercont
 
 如果你已经有一个真实存在的 `~/.codex` 目录，请先把它迁移到账户目录结构中：
 
-先在外部 Terminal 窗口关闭 Codex：
+先打开外部系统 Terminal 窗口并关闭 Codex：
 
 ```bash
 codex-account stop
@@ -71,6 +74,8 @@ codex-account create personal --migrate-current
 这个命令会把已有的 `~/.codex` 目录移动到 `~/.codex-personal`，然后重新创建 `~/.codex` 软链接指向它。
 
 迁移命令会在 Codex App 仍在运行时拒绝执行；如果无法确认 Codex 是否正在运行，也会拒绝迁移。这样可以避免 App 正在读写配置文件时移动目录。
+
+不要在 Codex 内置 Terminal 中执行迁移。脚本会检查常见的 Codex 环境标记，例如 `CODEX_SHELL`、`CODEX_SANDBOX`、`CODEX_THREAD_ID` 和 Codex App bundle identifier；一旦检测到这些标记，就会拒绝迁移。
 
 之后如果需要，可以再创建另一个账号目录：
 
@@ -87,6 +92,8 @@ codex-account work
 如果 `~/.codex` 已存在且不是软链接，`codex-account` 会拒绝切换账号，避免误删或覆盖你的已有数据。
 
 ## 使用方法
+
+关闭、启动、重启、切换和迁移命令请在外部系统 Terminal 中执行。Codex 内置 Terminal 只适合执行 `list`、`current` 这类安全的只读命令，或创建空账号目录。
 
 查看账号列表：
 
@@ -173,6 +180,7 @@ CODEX_APP_NAME="Codex" codex-account restart
 ## 注意事项
 
 - 账号名只能包含字母、数字、点、下划线和连字符。
+- 检测到 Codex 内置 Terminal 环境时，`stop`、`start`、`restart`、`switch` 和 `create <账号名> --migrate-current` 都会被拒绝执行。
 - `create <账号名> --migrate-current` 只会在确认 Codex 未运行、`~/.codex` 是真实目录且 `~/.codex-<账号名>` 不存在时执行迁移。
 - 切换账号时只会删除并重建 `~/.codex` 这个软链接。
 - `~/.codex-work` 这类账号目录不会被切换命令删除。
