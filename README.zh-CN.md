@@ -2,7 +2,7 @@
 
 [English](README.MD) | 简体中文 | [更新日志](CHANGELOG.md)
 
-`codex-workspaces` 用来切换多个 Codex 工作区目录。默认把每个工作区放在 `~/.codex-<工作区名>`，并让当前生效的 `~/.codex` 指向选中的工作区。
+`codex-workspaces` 用来切换多个 Codex 工作区目录。默认把每个工作区放在 `~/.codex-workspaces/workspaces/` 下，并让当前生效的 `~/.codex` 指向选中的工作区。
 
 项目现在有两个入口：
 
@@ -13,9 +13,11 @@
 
 ## 功能
 
-- 管理 `~/.codex-work`、`~/.codex-personal` 这类工作区目录。
+- 管理 `~/.codex-workspaces/workspaces/work` 这类工作区目录。
+- 管理 `~/.codex-workspaces/accounts/` 下的账号快照。
 - 切换当前 `~/.codex` 软链接或目录链接。
-- 初始化工作区目录，并支持把已有真实 `~/.codex` 目录迁移成工作区。
+- 初始化带元数据的工作区目录。
+- 通过 `accounts use` 临时切换当前工作区账号，并可恢复工作区默认账号。
 - 保留 macOS 上 Codex App 的 `stop`、`start`、`restart`。
 - 以只读方式读取 Codex `state_*.sqlite`，展示本地 token 用量统计。
 - 在检测到 Codex 内置 Terminal 且无法安全转交时，阻止危险操作。
@@ -61,11 +63,24 @@ tmp="$(mktemp -t codex-workspaces.XXXXXX)" && curl -fsSL https://raw.githubuserc
 
 ```text
 ~/.codex           -> 当前工作区链接
-~/.codex-work      名为 work 的工作区目录
-~/.codex-personal  名为 personal 的工作区目录
+~/.codex-workspaces/
+  config.json
+  state.json
+  lock
+  workspaces/
+    work/
+      auth.json
+      .codex-workspace.json
+    personal/
+      auth.json
+      .codex-workspace.json
+  accounts/
+    acct_work/
+      auth.json
+      meta.json
 ```
 
-可通过 `CODEX_WORKSPACES_LINK` 和 `CODEX_WORKSPACES_PREFIX` 自定义路径。
+可通过 `CODEX_WORKSPACES_LINK` 和 `CODEX_WORKSPACES_ROOT` 自定义路径。
 
 ## 使用
 
@@ -76,10 +91,15 @@ codex-workspaces init personal
 codex-workspaces init work
 ```
 
-如果已经有一个真实存在的 `~/.codex` 目录，先迁移：
+旧版 `~/.codex-<name>` 目录迁移刻意留到后续阶段。本版本只初始化新的统一目录工作区。
+
+在 Codex 已经在当前工作区写入 `auth.json` 后，设置账号快照：
 
 ```bash
-codex-workspaces init personal --migrate-current
+codex-workspaces use work --no-stop --no-start
+codex-workspaces accounts save work
+codex-workspaces accounts set-default work acct_work --activate
+codex-workspaces accounts list
 ```
 
 切换工作区：
@@ -106,6 +126,15 @@ codex-workspaces stats
 codex-workspaces stats work --days 14
 ```
 
+在当前工作区临时切换账号：
+
+```bash
+codex-workspaces accounts use acct_personal
+codex-workspaces accounts restore-default
+```
+
+`accounts use` 只修改当前工作区的 `active_account_id`，不会修改 `default_account_id`。执行 `codex-workspaces use <工作区>` 进入某个工作区时，如果配置了默认账号，会恢复该工作区默认账号。
+
 管理工作区备注和生命周期：
 
 ```bash
@@ -131,7 +160,7 @@ codex-workspaces restart
 | `CODEX_APP_NAME` | `Codex` | macOS App 名称。 |
 | `CODEX_QUIT_TIMEOUT` | `20` | 等待 App 退出的秒数。 |
 | `CODEX_WORKSPACES_LINK` | `$HOME/.codex` | 当前工作区链接路径。 |
-| `CODEX_WORKSPACES_PREFIX` | `$HOME/.codex-` | 工作区目录前缀。 |
+| `CODEX_WORKSPACES_ROOT` | `$HOME/.codex-workspaces` | workspaces、accounts、backups 和 lock 所在管理根目录。 |
 | `CODEX_WORKSPACES_LANG` | 自动 | 强制输出语言，可设为 `en` 或 `zh`。 |
 
 工作区相关配置只使用 `CODEX_WORKSPACES_*` 变量。

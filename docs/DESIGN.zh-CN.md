@@ -28,7 +28,8 @@ Python 版的目标是在保留 shell 脚本的情况下，提供可测试、可
 src/codex_workspaces/
   cli.py         命令分发和进程入口
   config.py      环境变量、默认路径、语言检测
-  core.py        工作区目录、链接切换、迁移和安装器逻辑
+  core.py        工作区目录、链接切换、账号绑定和安装器逻辑
+  store.py       统一目录、元数据、账号快照和锁
   stats.py       只读 Codex SQLite 的本地 token 统计
   platforms.py   平台差异：App 控制、Terminal 转交、目录链接
   errors.py      可预期命令错误
@@ -42,14 +43,16 @@ src/codex_workspaces/
 
 ```text
 active_link:    ~/.codex
-workspace_prefix: ~/.codex-
-workspace_dir:    ~/.codex-<name>
+root_dir:       ~/.codex-workspaces
+workspace_dir:  ~/.codex-workspaces/workspaces/<name>
+accounts_dir:   ~/.codex-workspaces/accounts
 ```
 
 工作区名规则：
 
 - 允许字母、数字、点、下划线、连字符。
-- 不允许空字符串、`.`、`..`。
+- 必须以字母或数字开头，最长 64 个字符。
+- 不允许空字符串、`.`、`..`、路径分隔符、`~` 和路径穿越。
 - 输入可以是 `work`、`.codex-work` 或路径形式，内部会归一化成工作区名。
 
 ## 平台策略
@@ -77,18 +80,21 @@ Windows：
 ## 安全设计
 
 - 如果 `~/.codex` 存在且不是链接，`switch` 拒绝执行，避免覆盖真实目录。
-- `init --migrate-current` 只迁移真实目录，不迁移已有链接。
+- 迁移和 login-temp 登录流程留到后续阶段；当前 Phase 1~3 只初始化新统一目录结构。
+- 切换 workspace 前会保存当前 live `auth.json` 到 `active_account_id` 对应账号快照。
+- `accounts use` 只修改当前 workspace 的 `active_account_id`，不修改 `default_account_id`。
+- 进入 workspace 时默认恢复该 workspace 的默认账号。
 - `stats` 只以 read-only SQLite URI 读取 `state_*.sqlite`，不写入 Codex 数据库。
 - 不实现 `quota`/`refresh` 这类依赖私有接口或私有行为的功能。
 - macOS 上迁移前必须确认 Codex App 未运行。
 - Codex 内置 Terminal 中的危险命令要么转交外部 Terminal，要么拒绝。
-- 任何切换都只替换 active link，不删除 `~/.codex-<name>` 工作区目录。
+- 任何切换都只替换 active link，不删除 workspace 目录。
 
 ## 配置
 
 工作区相关环境变量：
 
-- 变量：`CODEX_WORKSPACES_LINK`、`CODEX_WORKSPACES_PREFIX`、`CODEX_WORKSPACES_LANG`。
+- 变量：`CODEX_WORKSPACES_ROOT`、`CODEX_WORKSPACES_LINK`、`CODEX_WORKSPACES_WORKSPACES_DIR`、`CODEX_WORKSPACES_ACCOUNTS_DIR`、`CODEX_WORKSPACES_LANG`。
 
 Python CLI 和 Bash 脚本可以共存。通过 PyPI/pipx 安装时，`codex-workspaces` 命令来自 Python 包；直接执行仓库里的 `macos/codex-workspaces` 时，使用的是 macOS Bash 脚本。
 

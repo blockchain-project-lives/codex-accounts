@@ -41,7 +41,12 @@ def _expand_path(value: str) -> str:
 class Config:
     app_name: str
     home_dir: Path
+    root_dir: Path
     active_link: Path
+    workspaces_dir: Path
+    accounts_dir: Path
+    backups_dir: Path
+    lock_file: Path
     workspace_prefix: str
     quit_timeout: int
     lang: str
@@ -55,20 +60,42 @@ class Config:
     ) -> "Config":
         env = dict(os.environ if env is None else env)
         home_dir = Path(home or env.get("HOME") or Path.home()).expanduser()
+        root_dir = Path(
+            _expand_path(
+                env.get("CODEX_WORKSPACES_ROOT") or str(home_dir / ".codex-workspaces")
+            )
+        )
         active_link = Path(
             _expand_path(
                 env.get("CODEX_WORKSPACES_LINK") or str(home_dir / ".codex")
             )
         )
-        workspace_prefix = _expand_path(
-            env.get("CODEX_WORKSPACES_PREFIX") or str(home_dir / ".codex-")
+        workspaces_dir = Path(
+            _expand_path(
+                env.get("CODEX_WORKSPACES_WORKSPACES_DIR")
+                or str(root_dir / "workspaces")
+            )
         )
+        accounts_dir = Path(
+            _expand_path(
+                env.get("CODEX_WORKSPACES_ACCOUNTS_DIR")
+                or str(root_dir / "accounts")
+            )
+        )
+        backups_dir = root_dir / "backups"
+        lock_file = root_dir / "lock"
+        workspace_prefix = str(workspaces_dir) + os.sep
         quit_timeout = int(env.get("CODEX_QUIT_TIMEOUT") or "20")
 
         return cls(
             app_name=env.get("CODEX_APP_NAME") or "Codex",
             home_dir=home_dir,
+            root_dir=root_dir,
             active_link=active_link,
+            workspaces_dir=workspaces_dir,
+            accounts_dir=accounts_dir,
+            backups_dir=backups_dir,
+            lock_file=lock_file,
             workspace_prefix=workspace_prefix,
             quit_timeout=quit_timeout,
             lang=detect_ui_lang(env, apple_language),

@@ -2,7 +2,7 @@
 
 English | [简体中文](README.zh-CN.md) | [Changelog](CHANGELOG.md)
 
-`codex-workspaces` switches between multiple Codex workspace directories by keeping each workspace in `~/.codex-<name>` and pointing the active `~/.codex` path at the selected workspace.
+`codex-workspaces` switches between multiple Codex workspace directories under `~/.codex-workspaces/workspaces/` and points the active `~/.codex` path at the selected workspace.
 
 The project now has two entry points:
 
@@ -13,9 +13,11 @@ On macOS, the Python CLI preserves the original app workflow: stop Codex App, sw
 
 ## Features
 
-- Manage workspace directories such as `~/.codex-work` and `~/.codex-personal`.
+- Manage workspace directories such as `~/.codex-workspaces/workspaces/work`.
+- Manage account snapshots under `~/.codex-workspaces/accounts/`.
 - Switch the active `~/.codex` symlink or directory link.
-- Initialize workspace directories and migrate an existing real `~/.codex` directory.
+- Initialize workspace directories with metadata.
+- Temporarily switch the current workspace account with `accounts use`, then restore the workspace default account.
 - Keep macOS Codex App stop/start/restart support.
 - Show local token usage stats from Codex `state_*.sqlite` in read-only mode.
 - Block unsafe operations from a detected Codex built-in terminal when they cannot be delegated safely.
@@ -61,11 +63,24 @@ Default layout:
 
 ```text
 ~/.codex           -> active workspace link
-~/.codex-work      workspace directory named work
-~/.codex-personal  workspace directory named personal
+~/.codex-workspaces/
+  config.json
+  state.json
+  lock
+  workspaces/
+    work/
+      auth.json
+      .codex-workspace.json
+    personal/
+      auth.json
+      .codex-workspace.json
+  accounts/
+    acct_work/
+      auth.json
+      meta.json
 ```
 
-Customize paths with `CODEX_WORKSPACES_LINK` and `CODEX_WORKSPACES_PREFIX`.
+Customize paths with `CODEX_WORKSPACES_LINK` and `CODEX_WORKSPACES_ROOT`.
 
 ## Usage
 
@@ -76,10 +91,15 @@ codex-workspaces init personal
 codex-workspaces init work
 ```
 
-If you already have a real `~/.codex` directory, migrate it first:
+Migration from older `~/.codex-<name>` directories is intentionally deferred to a later phase. This release initializes new managed workspaces only.
+
+Set up account snapshots after Codex has created an `auth.json` in the active workspace:
 
 ```bash
-codex-workspaces init personal --migrate-current
+codex-workspaces use work --no-stop --no-start
+codex-workspaces accounts save work
+codex-workspaces accounts set-default work acct_work --activate
+codex-workspaces accounts list
 ```
 
 Switch workspaces:
@@ -106,6 +126,15 @@ codex-workspaces stats
 codex-workspaces stats work --days 14
 ```
 
+Switch accounts within the current workspace:
+
+```bash
+codex-workspaces accounts use acct_personal
+codex-workspaces accounts restore-default
+```
+
+`accounts use` only changes the current workspace `active_account_id`; it does not change `default_account_id`. Entering a workspace with `codex-workspaces use <workspace>` restores that workspace's default account when one is configured.
+
 Manage workspace metadata and lifecycle:
 
 ```bash
@@ -131,7 +160,7 @@ codex-workspaces restart
 | `CODEX_APP_NAME` | `Codex` | macOS app name to control. |
 | `CODEX_QUIT_TIMEOUT` | `20` | Seconds to wait for app exit. |
 | `CODEX_WORKSPACES_LINK` | `$HOME/.codex` | Active workspace link path. |
-| `CODEX_WORKSPACES_PREFIX` | `$HOME/.codex-` | Workspace directory prefix. |
+| `CODEX_WORKSPACES_ROOT` | `$HOME/.codex-workspaces` | Managed root for workspaces, accounts, backups, and lock file. |
 | `CODEX_WORKSPACES_LANG` | auto | Force output language with `en` or `zh`. |
 
 Only the `CODEX_WORKSPACES_*` variables are used for workspace-specific configuration.

@@ -253,7 +253,9 @@ class SystemPlatform:
             "CODEX_APP_NAME": config.app_name,
             "CODEX_QUIT_TIMEOUT": str(config.quit_timeout),
             "CODEX_WORKSPACES_LINK": str(config.active_link),
-            "CODEX_WORKSPACES_PREFIX": config.workspace_prefix,
+            "CODEX_WORKSPACES_ROOT": str(config.root_dir),
+            "CODEX_WORKSPACES_WORKSPACES_DIR": str(config.workspaces_dir),
+            "CODEX_WORKSPACES_ACCOUNTS_DIR": str(config.accounts_dir),
             "CODEX_WORKSPACES_LANG": config.lang,
         }
         for key, value in exports.items():

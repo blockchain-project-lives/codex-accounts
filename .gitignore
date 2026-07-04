@@ -14,3 +14,13 @@ dist/
 venv/
 
 .DS_Store
+
+# Codex local state and credentials
+.codex-workspaces/
+auth.json
+*.auth.json
+state_*.sqlite
+logs_*.sqlite
+sessions/
+archived_sessions/
+shell_snapshots/

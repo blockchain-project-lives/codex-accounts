@@ -58,11 +58,19 @@ class FakePlatform(SystemPlatform):
 def make_config(tmp_path: Path, lang: str = "en") -> Config:
     home = tmp_path / "home"
     home.mkdir()
+    root = home / ".codex-workspaces"
+    workspaces = root / "workspaces"
+    accounts = root / "accounts"
     return Config(
         app_name="Codex",
         home_dir=home,
+        root_dir=root,
         active_link=home / ".codex",
-        workspace_prefix=str(home / ".codex-"),
+        workspaces_dir=workspaces,
+        accounts_dir=accounts,
+        backups_dir=root / "backups",
+        lock_file=root / "lock",
+        workspace_prefix=str(workspaces) + "/",
         quit_timeout=20,
         lang=lang,
     )
@@ -138,6 +146,9 @@ class TestWorkspaceManager:
         assert "Initialized workspace directory" in output
         assert "Switched to: work" in output
         assert "work ->" in output
+        assert manager.workspace_dir("work") == manager.config.workspaces_dir / "work"
+        assert (manager.config.root_dir / "config.json").is_file()
+        assert (manager.workspace_dir("work") / ".codex-workspace.json").is_file()
         assert manager.current_target().kind == "target"
 
     def test_list_workspaces_marks_active_workspace(self, tmp_path: Path) -> None:
@@ -167,7 +178,7 @@ class TestWorkspaceManager:
         nested.mkdir()
         (nested / "data.txt").write_text("hello", encoding="utf-8")
 
-        assert manager.directory_size(manager.workspace_dir("work")) == 5
+        assert manager.directory_size(manager.workspace_dir("work")) >= 5
         assert manager.format_size(1536) == "1.5 KB"
 
     def test_switch_refuses_to_replace_real_directory(self, tmp_path: Path) -> None:
@@ -178,23 +189,10 @@ class TestWorkspaceManager:
         with pytest.raises(CodexWorkspacesError, match="not a symlink"):
             manager.switch_workspace("work", ["--no-stop", "--no-start"], ["switch", "work"])
 
-    def test_migrate_current_moves_real_directory_and_links_it(self, tmp_path: Path) -> None:
-        manager, stdout, _ = make_manager(tmp_path, FakePlatform(app_running=False))
-        manager.config.active_link.mkdir()
-        (manager.config.active_link / "config.toml").write_text("token = 'test'\n", encoding="utf-8")
+    def test_migrate_current_is_deferred_to_later_phase(self, tmp_path: Path) -> None:
+        manager, _, _ = make_manager(tmp_path)
 
-        manager.init_workspace("personal", ["--migrate-current"])
-
-        target = manager.workspace_dir("personal")
-        assert (target / "config.toml").read_text(encoding="utf-8") == "token = 'test'\n"
-        assert manager.current_target().kind == "target"
-        assert "Migrated current workspace" in stdout.getvalue()
-
-    def test_migrate_current_refuses_when_app_is_running(self, tmp_path: Path) -> None:
-        manager, _, _ = make_manager(tmp_path, FakePlatform(app_running=True))
-        manager.config.active_link.mkdir()
-
-        with pytest.raises(CodexWorkspacesError, match="is running"):
+        with pytest.raises(CodexWorkspacesError, match="later phase"):
             manager.init_workspace("personal", ["--migrate-current"])
 
     def test_default_switch_skips_app_control_on_non_macos_platforms(self, tmp_path: Path) -> None:
@@ -338,3 +336,79 @@ class TestWorkspaceManager:
         assert "main profile" in output
         assert "Cleared note: work" in output
         assert "No note set." in output
+
+    def test_accounts_save_use_restore_default_and_workspace_enter_reset(self, tmp_path: Path) -> None:
+        manager, stdout, _ = make_manager(tmp_path)
+        manager.init_workspace("work", [])
+        manager.init_workspace("personal", [])
+
+        manager.switch_workspace("work", ["--no-stop", "--no-start"], ["switch", "work"])
+        (manager.workspace_dir("work") / "auth.json").write_text('{"account":"work-v1"}\n', encoding="utf-8")
+        manager.accounts_save("acct_work")
+        manager.accounts_set_default("work", "acct_work", activate=True)
+
+        manager.switch_workspace("personal", ["--no-stop", "--no-start"], ["switch", "personal"])
+        (manager.workspace_dir("personal") / "auth.json").write_text('{"account":"personal"}\n', encoding="utf-8")
+        manager.accounts_save("acct_personal")
+        manager.accounts_set_default("personal", "acct_personal", activate=True)
+
+        manager.switch_workspace("work", ["--no-stop", "--no-start"], ["switch", "work"])
+        (manager.workspace_dir("work") / "auth.json").write_text('{"account":"work-v2"}\n', encoding="utf-8")
+        manager.accounts_use("acct_personal")
+
+        work_meta = manager.store.read_workspace_meta(manager.workspace_dir("work"), "work")
+        assert work_meta.default_account_id == "acct_work"
+        assert work_meta.active_account_id == "acct_personal"
+        assert (manager.workspace_dir("work") / "auth.json").read_text(encoding="utf-8") == '{"account":"personal"}\n'
+        assert manager.store.account_auth_path("acct_work").read_text(encoding="utf-8") == '{"account":"work-v2"}\n'
+
+        manager.switch_workspace("personal", ["--no-stop", "--no-start"], ["switch", "personal"])
+        manager.switch_workspace("work", ["--no-stop", "--no-start"], ["switch", "work"])
+
+        work_meta = manager.store.read_workspace_meta(manager.workspace_dir("work"), "work")
+        assert work_meta.active_account_id == "acct_work"
+        assert work_meta.default_account_id == "acct_work"
+        assert (manager.workspace_dir("work") / "auth.json").read_text(encoding="utf-8") == '{"account":"work-v2"}\n'
+
+        manager.accounts_use("acct_personal")
+        manager.accounts_restore_default()
+        work_meta = manager.store.read_workspace_meta(manager.workspace_dir("work"), "work")
+        assert work_meta.active_account_id == "acct_work"
+        assert (manager.workspace_dir("work") / "auth.json").read_text(encoding="utf-8") == '{"account":"work-v2"}\n'
+
+        stdout.seek(0)
+        stdout.truncate(0)
+        manager.accounts_list()
+        output = stdout.getvalue()
+        assert "acct_work" in output
+        assert "acct_personal" in output
+        assert "workspace-default" in output
+        assert "work" in output
+        assert "*" in output
+
+    def test_accounts_restore_default_requires_default_account(self, tmp_path: Path) -> None:
+        manager, _, _ = make_manager(tmp_path)
+        manager.init_workspace("work", [])
+        manager.switch_workspace("work", ["--no-stop", "--no-start"], ["switch", "work"])
+
+        with pytest.raises(CodexWorkspacesError, match="no default account"):
+            manager.accounts_restore_default()
+
+    def test_account_name_validation_rejects_empty_prefixed_id(self, tmp_path: Path) -> None:
+        manager, _, _ = make_manager(tmp_path)
+
+        with pytest.raises(CodexWorkspacesError):
+            manager.accounts_init("acct_")
+
+    def test_lock_blocks_account_switch(self, tmp_path: Path) -> None:
+        manager, _, _ = make_manager(tmp_path)
+        manager.init_workspace("work", [])
+        manager.switch_workspace("work", ["--no-stop", "--no-start"], ["switch", "work"])
+        (manager.workspace_dir("work") / "auth.json").write_text('{"account":"work"}\n', encoding="utf-8")
+        manager.accounts_save("acct_work")
+        manager.config.lock_file.write_text("busy\n", encoding="utf-8")
+
+        with pytest.raises(CodexWorkspacesError, match="lock acquisition failed"):
+            manager.accounts_use("acct_work")
+
+        manager.config.lock_file.unlink()

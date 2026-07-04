@@ -4,9 +4,10 @@
 
 测试覆盖三类风险：
 
-- 文件系统行为：初始化工作区、迁移工作区、切换链接、拒绝覆盖真实目录。
+- 文件系统行为：初始化统一目录工作区、切换链接、拒绝覆盖真实目录。
 - CLI 行为：命令别名、工作区名快捷切换、错误路径、帮助输出。
-- 管理行为：诊断、列表元信息、重命名、删除保护和备注读写。
+- 管理行为：诊断、列表元信息、重命名、删除保护、备注读写和账号绑定。
+- 账号行为：账号快照保存、列表、临时切换、默认账号恢复、默认账号设置。
 - 统计行为：只读 `state_*.sqlite`，汇总 token、模型、最近会话和每日用量。
 - 平台行为：macOS App 控制可注入，非 macOS 自动跳过 App 启停，Codex 内置 Terminal 阻止或转交危险操作。
 
@@ -54,39 +55,54 @@ python -m twine check dist/*
 ```bash
 tmp_home="$(mktemp -d)"
 CODEX_WORKSPACES_LINK="$tmp_home/.codex" \
-CODEX_WORKSPACES_PREFIX="$tmp_home/.codex-" \
+CODEX_WORKSPACES_ROOT="$tmp_home/.codex-workspaces" \
 codex-workspaces init personal
 
 CODEX_WORKSPACES_LINK="$tmp_home/.codex" \
-CODEX_WORKSPACES_PREFIX="$tmp_home/.codex-" \
+CODEX_WORKSPACES_ROOT="$tmp_home/.codex-workspaces" \
 codex-workspaces switch personal --no-stop --no-start
 
 CODEX_WORKSPACES_LINK="$tmp_home/.codex" \
-CODEX_WORKSPACES_PREFIX="$tmp_home/.codex-" \
+CODEX_WORKSPACES_ROOT="$tmp_home/.codex-workspaces" \
 codex-workspaces current
 
 CODEX_WORKSPACES_LINK="$tmp_home/.codex" \
-CODEX_WORKSPACES_PREFIX="$tmp_home/.codex-" \
+CODEX_WORKSPACES_ROOT="$tmp_home/.codex-workspaces" \
 codex-workspaces doctor
 
-CODEX_WORKSPACES_LINK="$tmp_home/.codex" \
-CODEX_WORKSPACES_PREFIX="$tmp_home/.codex-" \
-codex-workspaces stats personal --days 14
+# 如果该工作区已有 Codex state_*.sqlite，可验证 stats:
+# CODEX_WORKSPACES_LINK="$tmp_home/.codex" \
+# CODEX_WORKSPACES_ROOT="$tmp_home/.codex-workspaces" \
+# codex-workspaces stats personal --days 14
+
+printf '{"account":"personal"}\n' > "$tmp_home/.codex-workspaces/workspaces/personal/auth.json"
 
 CODEX_WORKSPACES_LINK="$tmp_home/.codex" \
-CODEX_WORKSPACES_PREFIX="$tmp_home/.codex-" \
+CODEX_WORKSPACES_ROOT="$tmp_home/.codex-workspaces" \
+codex-workspaces accounts save personal
+
+CODEX_WORKSPACES_LINK="$tmp_home/.codex" \
+CODEX_WORKSPACES_ROOT="$tmp_home/.codex-workspaces" \
+codex-workspaces accounts set-default personal acct_personal --activate
+
+CODEX_WORKSPACES_LINK="$tmp_home/.codex" \
+CODEX_WORKSPACES_ROOT="$tmp_home/.codex-workspaces" \
+codex-workspaces accounts list
+
+CODEX_WORKSPACES_LINK="$tmp_home/.codex" \
+CODEX_WORKSPACES_ROOT="$tmp_home/.codex-workspaces" \
 codex-workspaces note personal "primary workspace"
 
 CODEX_WORKSPACES_LINK="$tmp_home/.codex" \
-CODEX_WORKSPACES_PREFIX="$tmp_home/.codex-" \
+CODEX_WORKSPACES_ROOT="$tmp_home/.codex-workspaces" \
 codex-workspaces rename personal main
 
 CODEX_WORKSPACES_LINK="$tmp_home/.codex" \
-CODEX_WORKSPACES_PREFIX="$tmp_home/.codex-" \
+CODEX_WORKSPACES_ROOT="$tmp_home/.codex-workspaces" \
 codex-workspaces init scratch
 
 CODEX_WORKSPACES_LINK="$tmp_home/.codex" \
-CODEX_WORKSPACES_PREFIX="$tmp_home/.codex-" \
+CODEX_WORKSPACES_ROOT="$tmp_home/.codex-workspaces" \
 codex-workspaces delete scratch --force
 ```
 

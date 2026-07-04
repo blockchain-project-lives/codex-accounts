@@ -15,11 +15,19 @@ from test_core import FakePlatform
 def manager_for(tmp_path: Path) -> WorkspaceManager:
     home = tmp_path / "home"
     home.mkdir()
+    root = home / ".codex-workspaces"
+    workspaces = root / "workspaces"
+    accounts = root / "accounts"
     config = Config(
         app_name="Codex",
         home_dir=home,
+        root_dir=root,
         active_link=home / ".codex",
-        workspace_prefix=str(home / ".codex-"),
+        workspaces_dir=workspaces,
+        accounts_dir=accounts,
+        backups_dir=root / "backups",
+        lock_file=root / "lock",
+        workspace_prefix=str(workspaces) + "/",
         quit_timeout=20,
         lang="en",
     )
@@ -89,3 +97,25 @@ class TestCliDispatch:
         assert "Updated note: work" in output
         assert "Renamed workspace: work -> main" in output
         assert "Deleted workspace: main" in output
+
+    def test_accounts_dispatches_phase_one_to_three(self, tmp_path: Path) -> None:
+        manager = manager_for(tmp_path)
+
+        assert run(["init", "work"], manager) == 0
+        assert run(["work", "--no-stop", "--no-start"], manager) == 0
+        (manager.workspace_dir("work") / "auth.json").write_text('{"account":"work"}\n', encoding="utf-8")
+        assert run(["accounts", "save", "work"], manager) == 0
+        assert run(["accounts", "set-default", "work", "work", "--activate"], manager) == 0
+        assert run(["accounts", "current"], manager) == 0
+        assert run(["accounts", "list"], manager) == 0
+        assert run(["accounts", "restore-default"], manager) == 0
+
+        output = manager.stdout.getvalue()
+        assert "acct_work" in output
+        assert "active=acct_work default=acct_work" in output
+
+    def test_migrate_command_is_deferred(self, tmp_path: Path) -> None:
+        manager = manager_for(tmp_path)
+
+        with pytest.raises(CodexWorkspacesError, match="later phase"):
+            run(["migrate", "--dry-run"], manager)

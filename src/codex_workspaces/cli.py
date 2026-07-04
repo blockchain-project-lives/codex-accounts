@@ -30,6 +30,8 @@ def run(argv: Sequence[str], manager: WorkspaceManager) -> int:
     if command in {"doctor", "diagnose"}:
         manager.doctor()
         return 0
+    if command == "accounts":
+        return run_accounts(args, manager)
     if command == "stats":
         name = None
         days = 7
@@ -121,6 +123,11 @@ def run(argv: Sequence[str], manager: WorkspaceManager) -> int:
             manager.fail(f"未知参数: {args[1]}", f"Unknown option: {args[1]}")
         manager.install_self(args[0] if args else None)
         return 0
+    if command == "migrate":
+        manager.fail(
+            "migrate 将在后续阶段实现；当前只完成 Phase 1~3。",
+            "migrate will be implemented in a later phase; this build only includes phases 1-3.",
+        )
 
     try:
         if workspace_dir(manager.config, command).is_dir():
@@ -130,6 +137,83 @@ def run(argv: Sequence[str], manager: WorkspaceManager) -> int:
         pass
 
     manager.fail(f"未知命令或工作区不存在: {command}", f"Unknown command or workspace does not exist: {command}")
+    return 1
+
+
+def run_accounts(args: Sequence[str], manager: WorkspaceManager) -> int:
+    command = args[0] if args else "list"
+    rest = list(args[1:])
+    if command in {"list", "ls"}:
+        if rest:
+            manager.fail(f"未知参数: {rest[0]}", f"Unknown option: {rest[0]}")
+        manager.accounts_list()
+        return 0
+    if command in {"current", "whoami"}:
+        if rest:
+            manager.fail(f"未知参数: {rest[0]}", f"Unknown option: {rest[0]}")
+        manager.accounts_current()
+        return 0
+    if command == "info":
+        if len(rest) != 1:
+            manager.fail(
+                "用法: codex-workspaces accounts info <账号>",
+                "Usage: codex-workspaces accounts info <account>",
+            )
+        manager.accounts_info(rest[0])
+        return 0
+    if command == "init":
+        if len(rest) != 1:
+            manager.fail(
+                "用法: codex-workspaces accounts init <账号>",
+                "Usage: codex-workspaces accounts init <account>",
+            )
+        manager.accounts_init(rest[0])
+        return 0
+    if command == "save":
+        if len(rest) != 1:
+            manager.fail(
+                "用法: codex-workspaces accounts save <账号>",
+                "Usage: codex-workspaces accounts save <account>",
+            )
+        manager.accounts_save(rest[0])
+        return 0
+    if command == "use":
+        if len(rest) != 1:
+            manager.fail(
+                "用法: codex-workspaces accounts use <账号>",
+                "Usage: codex-workspaces accounts use <account>",
+            )
+        manager.accounts_use(rest[0])
+        return 0
+    if command == "restore-default":
+        if len(rest) > 1:
+            manager.fail(
+                "用法: codex-workspaces accounts restore-default [工作区]",
+                "Usage: codex-workspaces accounts restore-default [workspace]",
+            )
+        manager.accounts_restore_default(rest[0] if rest else None)
+        return 0
+    if command == "set-default":
+        activate = False
+        positional = []
+        for arg in rest:
+            if arg == "--activate":
+                activate = True
+            else:
+                positional.append(arg)
+        if len(positional) != 2:
+            manager.fail(
+                "用法: codex-workspaces accounts set-default <工作区> <账号> [--activate]",
+                "Usage: codex-workspaces accounts set-default <workspace> <account> [--activate]",
+            )
+        manager.accounts_set_default(positional[0], positional[1], activate)
+        return 0
+    if command in {"add", "import-workspaces", "import-legacy", "cleanup-login-temp"}:
+        manager.fail(
+            f"accounts {command} 将在后续阶段实现；当前只完成 Phase 1~3。",
+            f"accounts {command} will be implemented in a later phase; this build only includes phases 1-3.",
+        )
+    manager.fail(f"未知 accounts 命令: {command}", f"Unknown accounts command: {command}")
     return 1
 
 
