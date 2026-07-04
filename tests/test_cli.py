@@ -114,6 +114,20 @@ class TestCliDispatch:
         assert "acct_work" in output
         assert "active=acct_work default=acct_work" in output
 
+    def test_account_lifecycle_dispatches(self, tmp_path: Path) -> None:
+        manager = manager_for(tmp_path)
+
+        assert run(["accounts", "init", "research"], manager) == 0
+        assert run(["accounts", "note", "research", "lab"], manager) == 0
+        assert run(["accounts", "rename", "research", "lab"], manager) == 0
+        assert run(["accounts", "delete", "lab", "--force"], manager) == 0
+
+        output = manager.stdout.getvalue()
+        assert "Initialized account: acct_research" in output
+        assert "Updated account note: acct_research" in output
+        assert "Renamed account: acct_research -> acct_lab" in output
+        assert "Deleted account: acct_lab" in output
+
     def test_migrate_and_import_legacy_dispatch(self, tmp_path: Path) -> None:
         manager = manager_for(tmp_path)
         legacy = manager.config.home_dir / ".codex-work"

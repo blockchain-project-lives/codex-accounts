@@ -162,6 +162,16 @@ codex-workspaces accounts restore-default
 
 `auth.json` 包含认证凭据，不要提交到 git。工作区目录、账号快照、SQLite 状态、sessions 和 shell snapshots 已在本项目 `.gitignore` 中排除。
 
+管理账号备注和快照生命周期：
+
+```bash
+codex-workspaces accounts note acct_research "实验室账号"
+codex-workspaces accounts rename acct_research acct_lab
+codex-workspaces accounts delete acct_lab --force
+```
+
+删除账号始终需要 `--force`；如果某个工作区仍把该账号设为默认账号，删除会被拒绝。
+
 管理工作区备注和生命周期：
 
 ```bash

@@ -162,6 +162,16 @@ codex-workspaces accounts restore-default
 
 `auth.json` contains credentials. Do not commit workspace directories, account snapshots, SQLite state, sessions, or shell snapshots to git; the project `.gitignore` excludes these patterns for local checkouts.
 
+Manage account metadata and snapshots:
+
+```bash
+codex-workspaces accounts note acct_research "lab account"
+codex-workspaces accounts rename acct_research acct_lab
+codex-workspaces accounts delete acct_lab --force
+```
+
+Account deletion always requires `--force` and refuses to delete an account that is still configured as any workspace's default account.
+
 Manage workspace metadata and lifecycle:
 
 ```bash

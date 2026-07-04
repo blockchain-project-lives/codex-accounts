@@ -231,6 +231,30 @@ def run_accounts(args: Sequence[str], manager: WorkspaceManager) -> int:
             )
         manager.accounts_set_default(positional[0], positional[1], activate)
         return 0
+    if command in {"rename", "mv"}:
+        if len(rest) != 2:
+            manager.fail(
+                "用法: codex-workspaces accounts rename <旧账号> <新账号>",
+                "Usage: codex-workspaces accounts rename <old-account> <new-account>",
+            )
+        manager.accounts_rename(rest[0], rest[1])
+        return 0
+    if command in {"delete", "remove", "rm"}:
+        if not rest:
+            manager.fail(
+                "用法: codex-workspaces accounts delete <账号> --force",
+                "Usage: codex-workspaces accounts delete <account> --force",
+            )
+        manager.accounts_delete(rest[0], rest[1:])
+        return 0
+    if command == "note":
+        if not rest:
+            manager.fail(
+                "用法: codex-workspaces accounts note <账号> [备注文本|--clear]",
+                "Usage: codex-workspaces accounts note <account> [note text|--clear]",
+            )
+        manager.accounts_note(rest[0], rest[1:])
+        return 0
     if command == "import-workspaces":
         if rest:
             manager.fail(f"未知参数: {rest[0]}", f"Unknown option: {rest[0]}")

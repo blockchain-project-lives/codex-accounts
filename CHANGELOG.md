@@ -4,7 +4,7 @@ All notable changes to `codex-workspaces` will be documented in this file.
 
 This project follows a simple changelog format while it is still pre-release.
 
-## 0.2.1 - 2026-07-04
+## 0.3.0 - 2026-07-04
 
 ### Added
 
@@ -18,6 +18,7 @@ This project follows a simple changelog format while it is still pre-release.
 - Added the unified `~/.codex-workspaces/` root with workspace metadata, account snapshots, and default-account restore behavior.
 - Added legacy workspace migration with `migrate`, `migrate --dry-run`, and `init <workspace> --migrate-current`.
 - Added legacy account import with `accounts import-legacy` and workspace auth import with `accounts import-workspaces`.
+- Added account `rename`, guarded `delete --force`, and account `note` management.
 - Added `pyproject.toml`, package metadata, editable install support, and PyPI-ready build configuration.
 - Added GitHub Actions CI for Linux, macOS, Windows, and Python 3.9/3.11/3.13.
 - Added GitHub Actions Trusted Publishing workflow for PyPI releases.

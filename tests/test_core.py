@@ -565,3 +565,81 @@ class TestWorkspaceManager:
         assert meta.active_account_id == "acct_work"
         assert manager.store.account_auth_path("acct_work").read_text(encoding="utf-8") == '{"account":"work"}\n'
         assert "Imported workspace default accounts: 1" in stdout.getvalue()
+
+    def test_accounts_note_sets_reads_and_clears_meta_notes(self, tmp_path: Path) -> None:
+        manager, stdout, _ = make_manager(tmp_path)
+        manager.accounts_init("research")
+
+        manager.accounts_note("research", ["lab", "account"])
+        manager.accounts_note("research", [])
+        manager.accounts_note("research", ["--clear"])
+        manager.accounts_note("research", [])
+
+        meta = manager.store.read_account_meta("acct_research")
+        output = stdout.getvalue()
+        assert meta.notes == ""
+        assert "Updated account note: acct_research" in output
+        assert "lab account" in output
+        assert "Cleared account note: acct_research" in output
+        assert "No note set." in output
+
+    def test_accounts_rename_updates_workspace_default_and_active_refs(self, tmp_path: Path) -> None:
+        manager, stdout, _ = make_manager(tmp_path)
+        manager.init_workspace("work", [])
+        manager.switch_workspace("work", ["--no-stop", "--no-start"], ["switch", "work"])
+        (manager.workspace_dir("work") / "auth.json").write_text('{"account":"work"}\n', encoding="utf-8")
+        manager.accounts_save("work")
+        manager.accounts_set_default("work", "work", activate=True)
+
+        manager.accounts_rename("work", "office")
+
+        meta = manager.store.read_workspace_meta(manager.workspace_dir("work"), "work")
+        account_meta = manager.store.read_account_meta("acct_office")
+        assert meta.default_account_id == "acct_office"
+        assert meta.active_account_id == "acct_office"
+        assert account_meta.id == "acct_office"
+        assert account_meta.name == "office"
+        assert not manager.store.account_dir("acct_work").exists()
+        assert manager.store.account_auth_path("acct_office").read_text(encoding="utf-8") == '{"account":"work"}\n'
+        assert "Renamed account: acct_work -> acct_office" in stdout.getvalue()
+
+    def test_accounts_delete_requires_force_and_refuses_default_account(self, tmp_path: Path) -> None:
+        manager, _, _ = make_manager(tmp_path)
+        manager.init_workspace("work", [])
+        manager.switch_workspace("work", ["--no-stop", "--no-start"], ["switch", "work"])
+        (manager.workspace_dir("work") / "auth.json").write_text('{"account":"work"}\n', encoding="utf-8")
+        manager.accounts_save("work")
+        manager.accounts_set_default("work", "work", activate=True)
+
+        with pytest.raises(CodexWorkspacesError, match="requires --force"):
+            manager.accounts_delete("work", [])
+        with pytest.raises(CodexWorkspacesError, match="Cannot delete default account"):
+            manager.accounts_delete("work", ["--force"])
+
+        assert manager.store.account_dir("acct_work").is_dir()
+
+    def test_accounts_delete_removes_non_default_and_clears_active_refs(self, tmp_path: Path) -> None:
+        manager, stdout, _ = make_manager(tmp_path)
+        manager.init_workspace("work", [])
+        manager.switch_workspace("work", ["--no-stop", "--no-start"], ["switch", "work"])
+        (manager.workspace_dir("work") / "auth.json").write_text('{"account":"work"}\n', encoding="utf-8")
+        manager.accounts_save("work")
+        manager.accounts_set_default("work", "work", activate=True)
+        personal_auth = tmp_path / "personal-auth.json"
+        personal_auth.write_text('{"account":"personal"}\n', encoding="utf-8")
+        manager.store.create_account(
+            "acct_personal",
+            name="personal",
+            source="manual",
+            bound_workspace=None,
+            auth_source=personal_auth,
+        )
+        manager.accounts_use("personal")
+
+        manager.accounts_delete("personal", ["--force"])
+
+        meta = manager.store.read_workspace_meta(manager.workspace_dir("work"), "work")
+        assert meta.default_account_id == "acct_work"
+        assert meta.active_account_id is None
+        assert not manager.store.account_dir("acct_personal").exists()
+        assert "Deleted account: acct_personal" in stdout.getvalue()

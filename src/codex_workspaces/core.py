@@ -1139,6 +1139,122 @@ class WorkspaceManager:
             self.store.write_account_meta(account_meta)
         self.info(self.message(f"已设置默认账号: {clean_name} -> {account_id}", f"Set default account: {clean_name} -> {account_id}"))
 
+    def workspace_account_references(self, account_id: str) -> tuple[list[str], list[str]]:
+        default_refs: list[str] = []
+        active_refs: list[str] = []
+        for directory in self.workspace_dirs():
+            name = strip_workspace_name(str(directory))
+            meta = self.store.ensure_workspace_meta(name, directory)
+            if meta.default_account_id == account_id:
+                default_refs.append(name)
+            if meta.active_account_id == account_id:
+                active_refs.append(name)
+        return default_refs, active_refs
+
+    def accounts_rename(self, old_account: str, new_account: str) -> None:
+        self.store.ensure_layout()
+        old_id = self.account_id_from_input(old_account)
+        new_id = self.account_id_from_input(new_account)
+        if old_id == new_id:
+            self.fail("新旧账号名相同。", "Old and new account names are the same.")
+        old_dir = self.store.account_dir(old_id)
+        new_dir = self.store.account_dir(new_id)
+        if not self.store.account_meta_path(old_id).is_file():
+            self.fail(f"账号不存在: {old_id}", f"Account not found: {old_id}\nHint: run `codex-workspaces accounts list`")
+        if new_dir.exists():
+            self.fail(f"目标账号已存在: {new_id}", f"Target account already exists: {new_id}")
+
+        with self.store.lock():
+            old_dir.rename(new_dir)
+            meta = self.store.read_account_meta(new_id)
+            meta.id = new_id
+            meta.name = self.account_name_from_input(new_account)
+            meta.updated_at = iso_now()
+            self.store.write_account_meta(meta)
+            old_meta_path = self.store.account_meta_path(old_id)
+            if old_meta_path.exists():
+                old_meta_path.unlink()
+
+            for directory in self.workspace_dirs():
+                name = strip_workspace_name(str(directory))
+                workspace_meta = self.store.ensure_workspace_meta(name, directory)
+                changed = False
+                if workspace_meta.default_account_id == old_id:
+                    workspace_meta.default_account_id = new_id
+                    changed = True
+                if workspace_meta.active_account_id == old_id:
+                    workspace_meta.active_account_id = new_id
+                    changed = True
+                if changed:
+                    workspace_meta.updated_at = iso_now()
+                    self.store.write_workspace_meta(directory, workspace_meta)
+        self.info(self.message(f"已重命名账号: {old_id} -> {new_id}", f"Renamed account: {old_id} -> {new_id}"))
+
+    def accounts_delete(self, account: str, args: Sequence[str]) -> None:
+        self.store.ensure_layout()
+        force = False
+        for arg in args:
+            if arg == "--force":
+                force = True
+            else:
+                self.fail(f"未知参数: {arg}", f"Unknown option: {arg}")
+        if not force:
+            self.fail(
+                "删除账号需要 --force，避免误删认证快照。",
+                "Deleting an account requires --force to avoid accidental credential loss.",
+            )
+
+        account_id = self.account_id_from_input(account)
+        account_dir = self.store.account_dir(account_id)
+        if not self.store.account_meta_path(account_id).is_file():
+            self.fail(f"账号不存在: {account_id}", f"Account not found: {account_id}\nHint: run `codex-workspaces accounts list`")
+
+        default_refs, active_refs = self.workspace_account_references(account_id)
+        if default_refs:
+            refs = ", ".join(default_refs)
+            self.fail(
+                f"不能删除默认账号 {account_id}，仍被工作区使用: {refs}",
+                f"Cannot delete default account {account_id}; still used by workspaces: {refs}\nHint: run `codex-workspaces accounts set-default <workspace> <account>` first.",
+            )
+
+        with self.store.lock():
+            shutil.rmtree(account_dir)
+            for directory in self.workspace_dirs():
+                name = strip_workspace_name(str(directory))
+                workspace_meta = self.store.ensure_workspace_meta(name, directory)
+                if workspace_meta.active_account_id == account_id:
+                    workspace_meta.active_account_id = None
+                    workspace_meta.updated_at = iso_now()
+                    self.store.write_workspace_meta(directory, workspace_meta)
+        suffix = f" ({', '.join(active_refs)})" if active_refs else ""
+        self.info(self.message(f"已删除账号: {account_id}{suffix}", f"Deleted account: {account_id}{suffix}"))
+
+    def accounts_note(self, account: str, args: Sequence[str]) -> None:
+        self.store.ensure_layout()
+        account_id = self.account_id_from_input(account)
+        if not self.store.account_meta_path(account_id).is_file():
+            self.fail(f"账号不存在: {account_id}", f"Account not found: {account_id}\nHint: run `codex-workspaces accounts list`")
+        meta = self.store.read_account_meta(account_id)
+        if not args:
+            if meta.notes:
+                self.info(meta.notes)
+            else:
+                self.info(self.message("未设置备注。", "No note set."))
+            return
+        if len(args) == 1 and args[0] == "--clear":
+            meta.notes = ""
+            meta.updated_at = iso_now()
+            self.store.write_account_meta(meta)
+            self.info(self.message(f"已清除账号备注: {account_id}", f"Cleared account note: {account_id}"))
+            return
+        text = " ".join(args).strip()
+        if not text:
+            self.fail("备注不能为空。", "Note cannot be empty.")
+        meta.notes = text
+        meta.updated_at = iso_now()
+        self.store.write_account_meta(meta)
+        self.info(self.message(f"已更新账号备注: {account_id}", f"Updated account note: {account_id}"))
+
     def accounts_import_workspaces(self) -> None:
         self.store.ensure_layout()
         imported: list[str] = []
@@ -1333,6 +1449,9 @@ def usage(lang: str) -> str:
   codex-workspaces accounts use <账号>
   codex-workspaces accounts restore-default [工作区]
   codex-workspaces accounts set-default <工作区> <账号> [--activate]
+  codex-workspaces accounts rename <旧账号> <新账号>
+  codex-workspaces accounts delete <账号> --force
+  codex-workspaces accounts note <账号> [备注文本|--clear]
   codex-workspaces accounts import-workspaces
   codex-workspaces accounts import-legacy <旧账号目录>
       管理 auth.json 账号快照。accounts use 是临时切换，不修改工作区默认账号。
@@ -1411,6 +1530,9 @@ Usage:
   codex-workspaces accounts use <account>
   codex-workspaces accounts restore-default [workspace]
   codex-workspaces accounts set-default <workspace> <account> [--activate]
+  codex-workspaces accounts rename <old-account> <new-account>
+  codex-workspaces accounts delete <account> --force
+  codex-workspaces accounts note <account> [note text|--clear]
   codex-workspaces accounts import-workspaces
   codex-workspaces accounts import-legacy <legacy-accounts-dir>
       Manage auth.json account snapshots. accounts use is temporary and does not change the workspace default account.
