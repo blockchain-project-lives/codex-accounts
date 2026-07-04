@@ -10,10 +10,10 @@ from codex_workspaces.config import Config
 from codex_workspaces.cli import run
 from codex_workspaces.core import WorkspaceManager
 from codex_workspaces.errors import CodexWorkspacesError
-from test_core import FakePlatform
+from test_core import FakePlatform, MockPrivateApiProvider
 
 
-def manager_for(tmp_path: Path) -> WorkspaceManager:
+def manager_for(tmp_path: Path, private_api_provider=None) -> WorkspaceManager:
     home = tmp_path / "home"
     home.mkdir(parents=True)
     root = home / ".codex-workspaces"
@@ -27,12 +27,13 @@ def manager_for(tmp_path: Path) -> WorkspaceManager:
         workspaces_dir=workspaces,
         accounts_dir=accounts,
         backups_dir=root / "backups",
+        cache_dir=root / "cache",
         lock_file=root / "lock",
         workspace_prefix=str(workspaces) + "/",
         quit_timeout=20,
         lang="en",
     )
-    return WorkspaceManager(config, FakePlatform(), io.StringIO(), io.StringIO())
+    return WorkspaceManager(config, FakePlatform(), io.StringIO(), io.StringIO(), private_api_provider=private_api_provider)
 
 
 class TestCliDispatch:
@@ -153,6 +154,25 @@ class TestCliDispatch:
         assert "Refreshed account metadata" in output
         assert "Exported account backup" in output
         assert "Import Plan:" in output
+
+    def test_config_quota_and_accounts_quota_dispatch(self, tmp_path: Path) -> None:
+        provider = MockPrivateApiProvider()
+        manager = manager_for(tmp_path, private_api_provider=provider)
+
+        assert run(["init", "work"], manager) == 0
+        assert run(["work", "--no-stop", "--no-start"], manager) == 0
+        (manager.workspace_dir("work") / "auth.json").write_text('{"access_token":"secret-token"}\n', encoding="utf-8")
+        assert run(["accounts", "save", "work"], manager) == 0
+        assert run(["accounts", "set-default", "work", "work", "--activate"], manager) == 0
+        assert run(["config", "set", "experimental_private_api.enabled", "true"], manager) == 0
+        assert run(["config", "set", "experimental_private_api.quota_enabled", "true"], manager) == 0
+        assert run(["quota", "--json"], manager) == 0
+        assert run(["accounts", "quota", "work", "--json"], manager) == 0
+        assert run(["accounts", "list", "-a", "--json"], manager) == 0
+
+        output = manager.stdout.getvalue()
+        assert "secret-token" not in output
+        assert provider.quota_calls
 
     def test_account_lifecycle_dispatches(self, tmp_path: Path) -> None:
         manager = manager_for(tmp_path)

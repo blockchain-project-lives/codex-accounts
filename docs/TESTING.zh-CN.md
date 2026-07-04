@@ -10,6 +10,7 @@
 - 账号行为：账号快照保存、auth 元信息 best-effort 解析、列表/详情增强、备份导出导入、备注、重命名、删除保护、临时切换、login-temp 新增账号、默认账号恢复、默认账号设置。
 - 迁移行为：旧 `~/.codex-<name>` 工作区迁移、旧 `~/.codex-accounts` 导入、dry-run 不落盘、迁移前备份。
 - 统计行为：只读 `state_*.sqlite`，汇总 input/output/total token、模型、最近会话、每日、workspace、account，并覆盖 JSON/Markdown 输出。
+- 实验行为：private API 默认关闭、显式配置、mock provider 成功/失败、quota cache、JSON 输出脱敏、普通切换不触发 private API。
 - 平台行为：macOS App 控制可注入，非 macOS 自动跳过 App 启停，Codex 内置 Terminal 阻止或转交危险操作。
 
 ## 测试结构
@@ -119,6 +120,21 @@ codex-workspaces accounts export "$tmp_home/accounts-with-auth.tar.gz" --all --i
 CODEX_WORKSPACES_LINK="$tmp_home/.codex" \
 CODEX_WORKSPACES_ROOT="$tmp_home/.codex-workspaces" \
 codex-workspaces accounts import "$tmp_home/accounts-with-auth.tar.gz" --dry-run
+
+# 实验性实时额度功能默认关闭；如需手动验收，需要显式开启。
+CODEX_WORKSPACES_LINK="$tmp_home/.codex" \
+CODEX_WORKSPACES_ROOT="$tmp_home/.codex-workspaces" \
+codex-workspaces config set experimental_private_api.enabled true
+
+CODEX_WORKSPACES_LINK="$tmp_home/.codex" \
+CODEX_WORKSPACES_ROOT="$tmp_home/.codex-workspaces" \
+codex-workspaces config set experimental_private_api.quota_enabled true
+
+# 需要配置实际 provider endpoint 后才会真实请求；无 endpoint 时会安全失败。
+# CODEX_WORKSPACES_LINK="$tmp_home/.codex" \
+# CODEX_WORKSPACES_ROOT="$tmp_home/.codex-workspaces" \
+# codex-workspaces quota --json
+# codex-workspaces accounts list -a
 
 # 新账号登录流程会切到临时 login-research 工作区，登录完成后恢复原工作区。
 # CODEX_WORKSPACES_LINK="$tmp_home/.codex" \

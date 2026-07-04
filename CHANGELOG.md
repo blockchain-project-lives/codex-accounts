@@ -12,6 +12,12 @@ This project follows a simple changelog format while it is still pre-release.
 - Added `accounts refresh-meta <account>|--all [--overwrite]` for manually refreshing parsed account metadata.
 - Added `accounts export` and `accounts import` backup support with meta-only exports by default, explicit `--include-auth` credential export, dry-run import plans, conflict renaming, overwrite with pre-import backup, auth hash validation, and unsafe tar path rejection.
 - Added enhanced local `stats` views for summary, daily usage, top models, workspace aggregation, account aggregation, JSON output, and Markdown output.
+- Added experimental private API provider scaffolding for realtime account quota lookup.
+- Added `quota` for the current active account and `accounts quota <account>` for a specific managed account.
+- Added `accounts list -a` / `accounts list --all-with-quota` for realtime quota display across managed accounts.
+- Added `accounts refresh [account|--all]` for refreshing remote account metadata and quota cache without modifying `auth.json`.
+- Added `config get/set experimental_private_api.*` for explicitly enabling and configuring experimental private API behavior.
+- Added quota cache with TTL and auth-hash invalidation under `~/.codex-workspaces/cache/quota/`.
 
 ### Changed
 
@@ -24,6 +30,14 @@ This project follows a simple changelog format while it is still pre-release.
 - Added explicit warnings for exports that include `auth.json` credentials.
 - Added backup archive validation against path traversal, symlinks, device files, and auth hash mismatches during import.
 - Kept auth inspection local-only: no token refresh, no private API calls, no network requests, and no sensitive token-like fields in normal output.
+- Private API quota/refresh features are disabled by default and must be explicitly enabled.
+- Sensitive auth material is redacted from private API errors, command output, and quota cache.
+- Quota cache stores no tokens, cookies, authorization headers, or raw `auth.json`.
+
+### Notes
+
+- Realtime quota and refresh depend on experimental private Codex/OpenAI interfaces and may break when upstream behavior changes.
+- `stats` remains local historical usage; `quota` is realtime remote lookup and is intentionally separate.
 
 ## 0.3.1 - 2026-07-04
 

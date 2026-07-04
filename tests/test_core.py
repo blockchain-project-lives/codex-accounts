@@ -16,6 +16,8 @@ from codex_workspaces.config import Config
 from codex_workspaces.auth_inspector import inspect_auth_file
 from codex_workspaces.core import WorkspaceManager, strip_workspace_name, validate_workspace_name
 from codex_workspaces.errors import CodexWorkspacesError
+from codex_workspaces.private_api.errors import PrivateApiAuthError, PrivateApiForbiddenError, PrivateApiNetworkError, PrivateApiRateLimitedError, PrivateApiUnsupportedResponseError
+from codex_workspaces.private_api.models import AccountRemoteInfo, QuotaInfo
 import codex_workspaces.platforms as platforms_module
 from codex_workspaces.platforms import SystemPlatform
 
@@ -85,6 +87,7 @@ def make_config(tmp_path: Path, lang: str = "en", restore_policy: str = "workspa
         workspaces_dir=workspaces,
         accounts_dir=accounts,
         backups_dir=root / "backups",
+        cache_dir=root / "cache",
         lock_file=root / "lock",
         workspace_prefix=str(workspaces) + "/",
         quit_timeout=20,
@@ -93,7 +96,7 @@ def make_config(tmp_path: Path, lang: str = "en", restore_policy: str = "workspa
     )
 
 
-def make_manager(tmp_path: Path, platform: FakePlatform | None = None, lang: str = "en", restore_policy: str = "workspace-default"):
+def make_manager(tmp_path: Path, platform: FakePlatform | None = None, lang: str = "en", restore_policy: str = "workspace-default", private_api_provider=None):
     stdout = io.StringIO()
     stderr = io.StringIO()
     manager = WorkspaceManager(
@@ -101,8 +104,38 @@ def make_manager(tmp_path: Path, platform: FakePlatform | None = None, lang: str
         platform or FakePlatform(),
         stdout,
         stderr,
+        private_api_provider=private_api_provider,
     )
     return manager, stdout, stderr
+
+
+class MockPrivateApiProvider:
+    def __init__(self) -> None:
+        self.quota_calls = []
+        self.refresh_calls = []
+        self.quota_error = None
+        self.refresh_error = None
+        self.quota = QuotaInfo(status="ok", used_percent=72.0, remaining_percent=28.0, reset_at="2026-07-05T04:00:00+08:00", plan="Plus")
+
+    def get_quota(self, auth):
+        self.quota_calls.append(auth)
+        if self.quota_error:
+            raise self.quota_error
+        return self.quota
+
+    def refresh_account(self, auth):
+        self.refresh_calls.append(auth)
+        if self.refresh_error:
+            raise self.refresh_error
+        return AccountRemoteInfo(
+            email="remote@example.com",
+            account_id="remote_acc",
+            user_id="remote_user",
+            organization_id="remote_org",
+            plan="Plus",
+            quota=self.quota,
+            fetched_at="2026-07-04T20:30:00+08:00",
+        )
 
 
 def seed_state_db(path: Path) -> None:
@@ -714,6 +747,124 @@ class TestWorkspaceManager:
             archive.add(payload, arcname="../evil.txt")
         with pytest.raises(CodexWorkspacesError, match="Unsafe backup path"):
             manager.accounts_import_backup(str(unsafe), ["--dry-run"])
+
+    def test_private_api_defaults_disabled_and_config_validation(self, tmp_path: Path) -> None:
+        provider = MockPrivateApiProvider()
+        manager, stdout, _ = make_manager(tmp_path, private_api_provider=provider)
+        manager.init_workspace("work", [])
+        manager.switch_workspace("work", ["--no-stop", "--no-start"], ["switch", "work"])
+        (manager.workspace_dir("work") / "auth.json").write_text('{"access_token":"secret-token"}\n', encoding="utf-8")
+        manager.accounts_save("work")
+        manager.accounts_set_default("work", "work", activate=True)
+
+        with pytest.raises(PrivateApiAuthError):
+            raise PrivateApiAuthError("authorization bearer secret-token access_token")
+        with pytest.raises(CodexWorkspacesError, match="experimental private API features are disabled"):
+            manager.show_quota()
+        assert provider.quota_calls == []
+
+        manager.config_get("experimental_private_api.enabled")
+        assert "false" in stdout.getvalue().lower()
+        with pytest.raises(CodexWorkspacesError, match="Boolean"):
+            manager.config_set("experimental_private_api.enabled", "maybe")
+
+    def test_quota_current_account_specific_account_cache_and_json_redaction(self, tmp_path: Path) -> None:
+        provider = MockPrivateApiProvider()
+        manager, stdout, _ = make_manager(tmp_path, private_api_provider=provider)
+        manager.init_workspace("work", [])
+        manager.switch_workspace("work", ["--no-stop", "--no-start"], ["switch", "work"])
+        (manager.workspace_dir("work") / "auth.json").write_text('{"access_token":"secret-token","email":"work@example.com"}\n', encoding="utf-8")
+        manager.accounts_save("work")
+        manager.accounts_set_default("work", "work", activate=True)
+        manager.config_set("experimental_private_api.enabled", "true")
+        manager.config_set("experimental_private_api.quota_enabled", "true")
+        stdout.seek(0)
+        stdout.truncate(0)
+
+        manager.show_quota(json_output=True)
+        payload = json.loads(stdout.getvalue())
+        assert payload["quota"]["used_percent"] == 72.0
+        assert "secret-token" not in stdout.getvalue()
+        assert len(provider.quota_calls) == 1
+
+        stdout.seek(0)
+        stdout.truncate(0)
+        manager.accounts_quota("work", json_output=True)
+        assert json.loads(stdout.getvalue())["quota"]["cached"] is True
+        assert len(provider.quota_calls) == 1
+
+        stdout.seek(0)
+        stdout.truncate(0)
+        manager.accounts_quota("work", json_output=True, no_cache=True)
+        assert len(provider.quota_calls) == 2
+        cache_text = manager.quota_cache_path("acct_work").read_text(encoding="utf-8")
+        assert "secret-token" not in cache_text
+
+    def test_accounts_list_with_quota_handles_partial_failures_and_plain_list_is_local(self, tmp_path: Path) -> None:
+        provider = MockPrivateApiProvider()
+        manager, stdout, _ = make_manager(tmp_path, private_api_provider=provider)
+        manager.accounts_init("work")
+        auth_path = manager.store.account_dir("acct_work") / "auth.json"
+        auth_path.write_text('{"access_token":"secret-token"}\n', encoding="utf-8")
+        manager.store.save_auth_to_account("acct_work", auth_path)
+        manager.accounts_init("old")
+        manager.config_set("experimental_private_api.enabled", "true")
+        manager.config_set("experimental_private_api.quota_enabled", "true")
+        stdout.seek(0)
+        stdout.truncate(0)
+
+        manager.accounts_list()
+        assert provider.quota_calls == []
+
+        provider.quota_error = PrivateApiRateLimitedError("rate limited bearer secret-token")
+        manager.accounts_list(all_with_quota=True, verbose=True)
+        output = stdout.getvalue()
+        assert "error:rate limited" in output
+        assert "no-auth" in output
+        assert "secret-token" not in output
+
+    def test_accounts_refresh_updates_remote_meta_and_summary(self, tmp_path: Path) -> None:
+        provider = MockPrivateApiProvider()
+        manager, stdout, _ = make_manager(tmp_path, private_api_provider=provider)
+        manager.init_workspace("work", [])
+        manager.switch_workspace("work", ["--no-stop", "--no-start"], ["switch", "work"])
+        (manager.workspace_dir("work") / "auth.json").write_text('{"access_token":"secret-token"}\n', encoding="utf-8")
+        manager.accounts_save("work")
+        manager.accounts_set_default("work", "work", activate=True)
+        manager.accounts_init("empty")
+        manager.config_set("experimental_private_api.enabled", "true")
+        manager.config_set("experimental_private_api.refresh_enabled", "true")
+        stdout.seek(0)
+        stdout.truncate(0)
+
+        manager.accounts_refresh_remote([])
+        meta = manager.store.read_account_meta("acct_work")
+        assert meta.email == "remote@example.com"
+        assert meta.remote["quota_status"] == "ok"
+        assert manager.quota_cache_path("acct_work").is_file()
+
+        stdout.seek(0)
+        stdout.truncate(0)
+        manager.accounts_refresh_remote(["--all", "--json"])
+        payload = json.loads(stdout.getvalue())
+        assert payload["summary"]["refreshed"] == 1
+        assert payload["summary"]["skipped_no_auth"] == 1
+        assert "secret-token" not in stdout.getvalue()
+
+    def test_private_api_error_classes_are_redacted(self) -> None:
+        errors = [
+            PrivateApiAuthError("401 access_token secret"),
+            PrivateApiForbiddenError("403 authorization secret"),
+            PrivateApiRateLimitedError("429 bearer secret"),
+            PrivateApiNetworkError("timeout refresh_token secret"),
+            PrivateApiUnsupportedResponseError("bad cookie secret"),
+        ]
+        for exc in errors:
+            text = str(exc)
+            assert "access_token" not in text
+            assert "authorization" not in text
+            assert "refresh_token" not in text
+            assert "cookie" not in text
 
     def test_restore_policy_last_active_keeps_workspace_active_account(self, tmp_path: Path) -> None:
         manager, _, _ = make_manager(tmp_path, restore_policy="last-active")

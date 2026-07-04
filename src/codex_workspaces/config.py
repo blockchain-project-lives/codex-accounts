@@ -49,6 +49,7 @@ class Config:
     workspaces_dir: Path
     accounts_dir: Path
     backups_dir: Path
+    cache_dir: Path
     lock_file: Path
     workspace_prefix: str
     quit_timeout: int
@@ -87,6 +88,7 @@ class Config:
             )
         )
         backups_dir = root_dir / "backups"
+        cache_dir = root_dir / "cache"
         lock_file = root_dir / "lock"
         workspace_prefix = str(workspaces_dir) + os.sep
         quit_timeout = int(env.get("CODEX_QUIT_TIMEOUT") or "20")
@@ -102,6 +104,7 @@ class Config:
             workspaces_dir=workspaces_dir,
             accounts_dir=accounts_dir,
             backups_dir=backups_dir,
+            cache_dir=cache_dir,
             lock_file=lock_file,
             workspace_prefix=workspace_prefix,
             quit_timeout=quit_timeout,

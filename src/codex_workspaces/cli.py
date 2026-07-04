@@ -38,6 +38,20 @@ def run(argv: Sequence[str], manager: WorkspaceManager) -> int:
     if command in {"doctor", "diagnose"}:
         manager.doctor()
         return 0
+    if command == "config":
+        return run_config(args, manager)
+    if command == "quota":
+        json_output = False
+        no_cache = False
+        for arg in args:
+            if arg == "--json":
+                json_output = True
+            elif arg == "--no-cache":
+                no_cache = True
+            else:
+                manager.fail(f"未知参数: {arg}", f"Unknown option: {arg}")
+        manager.show_quota(json_output=json_output, no_cache=no_cache)
+        return 0
     if command == "accounts":
         return run_accounts(args, manager)
     if command == "stats":
@@ -230,9 +244,22 @@ def run_accounts(args: Sequence[str], manager: WorkspaceManager) -> int:
     command = args[0] if args else "list"
     rest = list(args[1:])
     if command in {"list", "ls"}:
-        if rest:
-            manager.fail(f"未知参数: {rest[0]}", f"Unknown option: {rest[0]}")
-        manager.accounts_list()
+        all_with_quota = False
+        no_cache = False
+        json_output = False
+        verbose = False
+        for arg in rest:
+            if arg in {"-a", "--all-with-quota"}:
+                all_with_quota = True
+            elif arg == "--no-cache":
+                no_cache = True
+            elif arg == "--json":
+                json_output = True
+            elif arg == "--verbose":
+                verbose = True
+            else:
+                manager.fail(f"未知参数: {arg}", f"Unknown option: {arg}")
+        manager.accounts_list(all_with_quota=all_with_quota, no_cache=no_cache, json_output=json_output, verbose=verbose)
         return 0
     if command in {"current", "whoami"}:
         if rest:
@@ -270,6 +297,29 @@ def run_accounts(args: Sequence[str], manager: WorkspaceManager) -> int:
                 "Usage: codex-workspaces accounts refresh-meta <account>|--all [--overwrite]",
             )
         manager.accounts_refresh_meta(rest)
+        return 0
+    if command == "refresh":
+        manager.accounts_refresh_remote(rest)
+        return 0
+    if command == "quota":
+        if not rest:
+            manager.fail(
+                "用法: codex-workspaces accounts quota <账号> [--json] [--no-cache]",
+                "Usage: codex-workspaces accounts quota <account> [--json] [--no-cache]",
+            )
+        json_output = False
+        no_cache = False
+        account = None
+        for arg in rest:
+            if arg == "--json":
+                json_output = True
+            elif arg == "--no-cache":
+                no_cache = True
+            elif account is None:
+                account = arg
+            else:
+                manager.fail(f"未知参数: {arg}", f"Unknown option: {arg}")
+        manager.accounts_quota(account or "", json_output=json_output, no_cache=no_cache)
         return 0
     if command == "export":
         if not rest:
@@ -375,6 +425,23 @@ def run_accounts(args: Sequence[str], manager: WorkspaceManager) -> int:
         manager.accounts_import_legacy(rest[0])
         return 0
     manager.fail(f"未知 accounts 命令: {command}", f"Unknown accounts command: {command}")
+    return 1
+
+
+def run_config(args: Sequence[str], manager: WorkspaceManager) -> int:
+    command = args[0] if args else "get"
+    rest = list(args[1:])
+    if command == "get":
+        if len(rest) != 1:
+            manager.fail("用法: codex-workspaces config get <key>", "Usage: codex-workspaces config get <key>")
+        manager.config_get(rest[0])
+        return 0
+    if command == "set":
+        if len(rest) != 2:
+            manager.fail("用法: codex-workspaces config set <key> <value>", "Usage: codex-workspaces config set <key> <value>")
+        manager.config_set(rest[0], rest[1])
+        return 0
+    manager.fail(f"未知 config 命令: {command}", f"Unknown config command: {command}")
     return 1
 
 

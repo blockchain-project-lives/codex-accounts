@@ -184,6 +184,52 @@ codex-workspaces stats work --days 14
 
 `stats` only reads local SQLite state. Missing or unrecognized workspace/account/model data is shown as `unknown`; results are best-effort and depend on the local Codex files available in each workspace.
 
+## Experimental Realtime Quota
+
+`codex-workspaces` can optionally query realtime quota for managed accounts through an experimental private API provider.
+
+This feature is disabled by default. It may break when upstream Codex/OpenAI internals change, may return `401`/`403`/`429`, and is not required for workspace or account switching.
+
+Enable explicitly:
+
+```bash
+codex-workspaces config set experimental_private_api.enabled true
+codex-workspaces config set experimental_private_api.quota_enabled true
+codex-workspaces config set experimental_private_api.refresh_enabled true
+```
+
+Query current account quota:
+
+```bash
+codex-workspaces quota
+codex-workspaces quota --json
+```
+
+Query a specific managed account:
+
+```bash
+codex-workspaces accounts quota acct_work
+```
+
+Query all accounts with quota:
+
+```bash
+codex-workspaces accounts list -a
+codex-workspaces accounts list --all-with-quota --json
+```
+
+Refresh remote account metadata and quota cache:
+
+```bash
+codex-workspaces accounts refresh
+codex-workspaces accounts refresh acct_work
+codex-workspaces accounts refresh --all --json
+```
+
+Realtime quota uses explicit experimental configuration, timeout, serial account iteration, and a local TTL cache under `~/.codex-workspaces/cache/quota/`. The cache stores quota summaries and auth hashes only; it does not store tokens, cookies, authorization headers, or raw `auth.json`.
+
+`stats` and `quota` are different: `stats` is local historical usage from SQLite, while `quota` is a realtime remote lookup. Quota failures do not affect local workspace/account switching.
+
 Switch accounts within the current workspace:
 
 ```bash

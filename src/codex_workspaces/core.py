@@ -20,7 +20,10 @@ from typing import Iterable, List, Optional, Sequence, TextIO
 from .config import Config
 from .errors import CodexWorkspacesError
 from .platforms import SystemPlatform
-from .store import AccountMeta, WorkspaceMeta, WorkspaceStore, auth_hash, chmod_best_effort, copy_auth, iso_now, write_json_atomic
+from .private_api import AccountRemoteInfo, AuthMaterial, ConfiguredHttpPrivateApiProvider, PrivateApiProvider, QuotaInfo
+from .private_api.auth import extract_auth_material
+from .private_api.errors import PrivateApiDisabledError, PrivateApiError
+from .store import AccountMeta, WorkspaceMeta, WorkspaceStore, auth_hash, chmod_best_effort, copy_auth, iso_now, read_json, write_json_atomic
 from .stats import ModelUsage, StatsBundle, StatsError, WorkspaceStats, combine_workspace_stats, compute_workspace_stats
 
 WORKSPACE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -89,6 +92,7 @@ class WorkspaceManager:
         stdout: Optional[TextIO] = None,
         stderr: Optional[TextIO] = None,
         stdin: Optional[TextIO] = None,
+        private_api_provider: Optional[PrivateApiProvider] = None,
     ) -> None:
         self.config = config
         self.platform = platform_service or SystemPlatform()
@@ -96,6 +100,7 @@ class WorkspaceManager:
         self.stderr = stderr or sys.stderr
         self.stdin = stdin or sys.stdin
         self.store = WorkspaceStore(config)
+        self.private_api_provider = private_api_provider
 
     def is_zh(self) -> bool:
         return self.config.lang == "zh"
@@ -397,6 +402,125 @@ class WorkspaceManager:
             return stat.S_IMODE(path.stat().st_mode)
         except OSError:
             return None
+
+    def config_path(self) -> Path:
+        return self.config.root_dir / "config.json"
+
+    def read_tool_config(self) -> dict:
+        self.store.ensure_layout()
+        data = read_json(self.config_path())
+        private = data.setdefault("experimental_private_api", {})
+        defaults = self.default_private_api_config()
+        for key, value in defaults.items():
+            private.setdefault(key, value)
+        return data
+
+    def write_tool_config(self, data: dict) -> None:
+        write_json_atomic(self.config_path(), data)
+
+    def default_private_api_config(self) -> dict:
+        return {
+            "enabled": False,
+            "quota_enabled": False,
+            "refresh_enabled": False,
+            "provider": "codex",
+            "base_url": "",
+            "quota_endpoint": "",
+            "account_endpoint": "",
+            "timeout_seconds": 10,
+            "rate_limit_per_minute": 20,
+            "cache_ttl_seconds": 300,
+            "redact_sensitive_logs": True,
+        }
+
+    def private_api_settings(self) -> dict:
+        return dict(self.read_tool_config().get("experimental_private_api") or self.default_private_api_config())
+
+    def config_get(self, key: str) -> None:
+        data = self.read_tool_config()
+        value = self.config_value(data, key)
+        self.info(json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list, bool, int, float)) else str(value))
+
+    def config_set(self, key: str, raw_value: str) -> None:
+        allowed = {
+            "experimental_private_api.enabled": "bool",
+            "experimental_private_api.quota_enabled": "bool",
+            "experimental_private_api.refresh_enabled": "bool",
+            "experimental_private_api.provider": "str",
+            "experimental_private_api.base_url": "str",
+            "experimental_private_api.quota_endpoint": "str",
+            "experimental_private_api.account_endpoint": "str",
+            "experimental_private_api.timeout_seconds": "int",
+            "experimental_private_api.rate_limit_per_minute": "int",
+            "experimental_private_api.cache_ttl_seconds": "int",
+            "experimental_private_api.redact_sensitive_logs": "bool",
+        }
+        if key not in allowed:
+            self.fail(f"不支持的配置项: {key}", f"Unsupported config key: {key}")
+        value = self.parse_config_value(raw_value, allowed[key])
+        data = self.read_tool_config()
+        target = data
+        parts = key.split(".")
+        for part in parts[:-1]:
+            target = target.setdefault(part, {})
+        target[parts[-1]] = value
+        self.write_tool_config(data)
+        self.info(self.message(f"已设置配置: {key} = {value}", f"Set config: {key} = {value}"))
+
+    def config_value(self, data: dict, key: str):
+        current = data
+        for part in key.split("."):
+            if not isinstance(current, dict) or part not in current:
+                self.fail(f"配置项不存在: {key}", f"Config key not found: {key}")
+            current = current[part]
+        return current
+
+    def parse_config_value(self, raw_value: str, kind: str):
+        if kind == "bool":
+            lowered = raw_value.lower()
+            if lowered in {"true", "1", "yes", "on"}:
+                return True
+            if lowered in {"false", "0", "no", "off"}:
+                return False
+            self.fail("布尔配置值必须是 true/false。", "Boolean config values must be true or false.")
+        if kind == "int":
+            try:
+                value = int(raw_value)
+            except ValueError:
+                self.fail("整数配置值无效。", "Invalid integer config value.")
+            if value < 0:
+                self.fail("整数配置值不能为负数。", "Integer config value cannot be negative.")
+            return value
+        return raw_value
+
+    def ensure_private_api_enabled(self, feature: str) -> dict:
+        settings = self.private_api_settings()
+        feature_key = f"{feature}_enabled"
+        if not settings.get("enabled") or not settings.get(feature_key):
+            self.fail(
+                "实验性 private API 功能未开启。\n\n"
+                "显式开启:\n"
+                "  codex-workspaces config set experimental_private_api.enabled true\n"
+                f"  codex-workspaces config set experimental_private_api.{feature_key} true\n\n"
+                "该功能可能依赖 Codex/OpenAI 私有接口，可能随时失效。",
+                "experimental private API features are disabled.\n\n"
+                "Enable explicitly:\n"
+                "  codex-workspaces config set experimental_private_api.enabled true\n"
+                f"  codex-workspaces config set experimental_private_api.{feature_key} true\n\n"
+                "This feature may depend on private Codex/OpenAI APIs and can break at any time."
+            )
+        return settings
+
+    def private_provider(self, settings: dict) -> PrivateApiProvider:
+        if self.private_api_provider is not None:
+            return self.private_api_provider
+        return ConfiguredHttpPrivateApiProvider(
+            base_url=settings.get("base_url") or None,
+            quota_endpoint=settings.get("quota_endpoint") or None,
+            account_endpoint=settings.get("account_endpoint") or None,
+            timeout_seconds=int(settings.get("timeout_seconds") or 10),
+            user_agent=f"codex-workspaces/{self.tool_version()} experimental-private-api",
+        )
 
     def show_stats(
         self,
@@ -1317,7 +1441,14 @@ class WorkspaceManager:
         validate_workspace_name(clean)
         return clean
 
-    def accounts_list(self) -> None:
+    def accounts_list(
+        self,
+        *,
+        all_with_quota: bool = False,
+        no_cache: bool = False,
+        json_output: bool = False,
+        verbose: bool = False,
+    ) -> None:
         self.store.ensure_layout()
         current_account = None
         default_account = None
@@ -1334,6 +1465,9 @@ class WorkspaceManager:
             self.info(self.message("未找到账号。", "No accounts found."))
             return
         accounts = [self.refresh_account_for_display(account.id) for account in accounts]
+        if all_with_quota:
+            self.render_accounts_list_with_quota(accounts, current_account, default_account, no_cache=no_cache, json_output=json_output, verbose=verbose)
+            return
         self.info("CURRENT  DEFAULT  AUTH  STATUS       ACCOUNT          SOURCE              DEFAULT_IN        ACTIVE_IN         NOTE                     LAST_USED")
         for account in accounts:
             current_mark = "*" if account.id == current_account else ""
@@ -1345,6 +1479,58 @@ class WorkspaceManager:
                 f"{status:<12} {account.id:<16} {account.source:<19} "
                 f"{self.format_refs(default_refs):<17} {self.format_refs(active_refs):<17} "
                 f"{self.format_note(account.notes) or '-':<24} {account.last_used_at or '-'}"
+            )
+
+    def render_accounts_list_with_quota(
+        self,
+        accounts: Sequence[AccountMeta],
+        current_account: Optional[str],
+        default_account: Optional[str],
+        *,
+        no_cache: bool,
+        json_output: bool,
+        verbose: bool,
+    ) -> None:
+        rows = []
+        for account in accounts:
+            if not self.store.account_auth_path(account.id).is_file():
+                quota = QuotaInfo(status="no-auth", source="local")
+            else:
+                quota = self.quota_for_account_or_error(account.id, no_cache=no_cache, verbose=verbose)
+            rows.append({"account": account, "quota": quota})
+        if json_output:
+            self.info(
+                json.dumps(
+                    [
+                        {
+                            "account": row["account"].id,
+                            "email": row["account"].email,
+                            "plan": row["quota"].plan or row["account"].plan,
+                            "current": row["account"].id == current_account,
+                            "default": row["account"].id == default_account,
+                            "quota": row["quota"].to_dict(),
+                        }
+                        for row in rows
+                    ],
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return
+        self.info("CURRENT  DEFAULT  ACCOUNT          EMAIL                PLAN    QUOTA    RESET             STATUS     SOURCE")
+        for row in rows:
+            account = row["account"]
+            quota = row["quota"]
+            current_mark = "*" if account.id == current_account else ""
+            default_mark = "*" if account.id == default_account else ""
+            reset_at = quota.reset_at[:16].replace("T", " ") if quota.reset_at else "-"
+            status = quota.status
+            if quota.error and verbose:
+                status = f"{status}:{quota.error}"
+            self.info(
+                f"{current_mark:<8} {default_mark:<8} {account.id:<16} {(account.email or '-'): <20} "
+                f"{(quota.plan or account.plan or '-'): <7} {self.percent_text(quota.used_percent):<8} {reset_at:<17} {status:<10} {quota.source}"
             )
 
     def accounts_current(self) -> None:
@@ -1401,6 +1587,151 @@ class WorkspaceManager:
         if self.store.account_auth_path(account_id).is_file():
             return self.store.refresh_account_meta(account_id, overwrite=False)
         return self.store.read_account_meta(account_id)
+
+    def current_workspace_account(self) -> tuple[str, Path, WorkspaceMeta]:
+        current = self.current_target()
+        if current.kind != "target" or current.path is None:
+            self.fail("当前工作区不存在。", "Current workspace does not exist.")
+        name = self.current_name(current.path) or "current"
+        meta = self.store.ensure_workspace_meta(name, current.path)
+        account_id = meta.active_account_id or meta.default_account_id
+        if not account_id:
+            self.fail("当前工作区没有 active/default account。", "Current workspace has no active/default account.")
+        return name, current.path, meta
+
+    def quota_cache_path(self, account_id: str) -> Path:
+        return self.config.cache_dir / "quota" / f"{account_id}.json"
+
+    def read_quota_cache(self, account_id: str, auth_material: AuthMaterial, ttl_seconds: int) -> QuotaInfo | None:
+        path = self.quota_cache_path(account_id)
+        if not path.is_file():
+            return None
+        data = read_json(path)
+        if data.get("auth_hash") != auth_material.raw_auth_hash:
+            return None
+        quota_data = data.get("quota")
+        if not isinstance(quota_data, dict):
+            return None
+        fetched_at = quota_data.get("fetched_at") or data.get("fetched_at")
+        if not self.cache_fresh(fetched_at, ttl_seconds):
+            return None
+        quota = QuotaInfo.from_dict(quota_data)
+        quota.cached = True
+        quota.source = "cache"
+        return quota
+
+    def cache_fresh(self, fetched_at: Optional[str], ttl_seconds: int) -> bool:
+        if not fetched_at:
+            return False
+        try:
+            timestamp = datetime.fromisoformat(fetched_at.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.astimezone()
+        return (datetime.now().astimezone() - timestamp).total_seconds() <= ttl_seconds
+
+    def write_quota_cache(self, account_id: str, auth_material: AuthMaterial, quota: QuotaInfo) -> None:
+        quota.fetched_at = quota.fetched_at or iso_now()
+        path = self.quota_cache_path(account_id)
+        write_json_atomic(
+            path,
+            {
+                "schema_version": 1,
+                "account_id": account_id,
+                "auth_hash": auth_material.raw_auth_hash,
+                "quota": quota.to_dict(),
+            },
+        )
+
+    def account_auth_material(self, account_id: str) -> AuthMaterial:
+        auth_path = self.store.account_auth_path(account_id)
+        if not auth_path.is_file():
+            self.fail(f"账号缺少 auth.json: {account_id}", f"Account is missing auth.json: {account_id}")
+        return extract_auth_material(account_id, auth_path)
+
+    def get_account_quota(self, account_id: str, *, no_cache: bool = False) -> QuotaInfo:
+        settings = self.ensure_private_api_enabled("quota")
+        auth_material = self.account_auth_material(account_id)
+        ttl = int(settings.get("cache_ttl_seconds") or 300)
+        if not no_cache:
+            cached = self.read_quota_cache(account_id, auth_material, ttl)
+            if cached:
+                return cached
+        provider = self.private_provider(settings)
+        try:
+            quota = provider.get_quota(auth_material)
+            quota.fetched_at = quota.fetched_at or iso_now()
+            quota.cached = False
+            if quota.used_percent is None and quota.used is not None and quota.limit:
+                quota.used_percent = quota.used / quota.limit * 100
+            if quota.remaining_percent is None and quota.used_percent is not None:
+                quota.remaining_percent = max(0.0, 100.0 - quota.used_percent)
+            self.write_quota_cache(account_id, auth_material, quota)
+            return quota
+        except PrivateApiError:
+            if not no_cache:
+                cached = self.read_quota_cache(account_id, auth_material, ttl)
+                if cached:
+                    return cached
+            raise
+
+    def quota_for_account_or_error(self, account_id: str, *, no_cache: bool = False, verbose: bool = False) -> QuotaInfo:
+        try:
+            return self.get_account_quota(account_id, no_cache=no_cache)
+        except PrivateApiDisabledError as exc:
+            return QuotaInfo(status="disabled", error=str(exc), source="disabled")
+        except CodexWorkspacesError as exc:
+            if "experimental private API features are disabled" in str(exc) or "private API 功能未开启" in str(exc):
+                return QuotaInfo(status="disabled", error=str(exc), source="disabled")
+            return QuotaInfo(status="no-auth", error=str(exc), source="local")
+        except PrivateApiError as exc:
+            return QuotaInfo(status="error", error=str(exc) if verbose else None, source="private-api")
+
+    def show_quota(self, *, json_output: bool = False, no_cache: bool = False) -> None:
+        workspace, _, meta = self.current_workspace_account()
+        account_id = meta.active_account_id or meta.default_account_id
+        assert account_id is not None
+        quota = self.get_account_quota(account_id, no_cache=no_cache)
+        account_meta = self.store.read_account_meta(account_id) if self.store.account_meta_path(account_id).is_file() else None
+        self.render_quota(workspace, account_id, quota, account_meta, json_output=json_output)
+
+    def accounts_quota(self, account: str, *, json_output: bool = False, no_cache: bool = False) -> None:
+        account_id = self.account_id_from_input(account)
+        if not self.store.account_meta_path(account_id).is_file():
+            self.fail(f"账号不存在: {account_id}", f"Account not found: {account_id}")
+        quota = self.get_account_quota(account_id, no_cache=no_cache)
+        self.render_quota(None, account_id, quota, self.store.read_account_meta(account_id), json_output=json_output)
+
+    def render_quota(self, workspace: Optional[str], account_id: str, quota: QuotaInfo, account_meta: Optional[AccountMeta], *, json_output: bool) -> None:
+        payload = {
+            "workspace": workspace,
+            "account": account_id,
+            "email": account_meta.email if account_meta else None,
+            "plan": quota.plan or (account_meta.plan if account_meta else None),
+            "quota": quota.to_dict(),
+        }
+        if json_output:
+            self.info(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+            return
+        self.info(self.bold(self.message("当前账号额度:", "Current Account Quota:")))
+        self.info(f"  workspace: {workspace or '-'}")
+        self.info(f"  account: {account_id}")
+        self.info(f"  email: {(account_meta.email if account_meta else None) or 'unknown'}")
+        self.info(f"  plan: {quota.plan or (account_meta.plan if account_meta else None) or 'unknown'}")
+        self.info()
+        self.info("Quota:")
+        self.info(f"  status: {quota.status}")
+        self.info(f"  used: {self.percent_text(quota.used_percent)}")
+        self.info(f"  remaining: {self.percent_text(quota.remaining_percent)}")
+        self.info(f"  reset_at: {quota.reset_at or 'unknown'}")
+        self.info(f"  window: {str(quota.window_duration_mins) + 'm' if quota.window_duration_mins is not None else 'unknown'}")
+        self.info(f"  source: {quota.source}")
+        self.info(f"  cached: {self._yes_no(quota.cached)}")
+        self.info(f"  fetched_at: {quota.fetched_at or 'unknown'}")
+
+    def percent_text(self, value: Optional[float]) -> str:
+        return "unknown" if value is None else f"{value:.0f}%"
 
     def accounts_init(self, account: str) -> None:
         self.store.ensure_layout()
@@ -1883,6 +2214,103 @@ class WorkspaceManager:
                 updated += 1
         self.info(self.message(f"已刷新账号元信息: {updated}", f"Refreshed account metadata: {updated}"))
 
+    def accounts_refresh_remote(self, args: Sequence[str]) -> None:
+        self.store.ensure_layout()
+        refresh_all = False
+        json_output = False
+        account: Optional[str] = None
+        for arg in args:
+            if arg == "--all":
+                refresh_all = True
+            elif arg == "--json":
+                json_output = True
+            elif arg.startswith("-"):
+                self.fail(f"未知参数: {arg}", f"Unknown option: {arg}")
+            elif account is None:
+                account = arg
+            else:
+                self.fail(f"未知参数: {arg}", f"Unknown option: {arg}")
+
+        if not refresh_all and account is None:
+            _, _, meta = self.current_workspace_account()
+            account = meta.active_account_id or meta.default_account_id
+        if refresh_all:
+            account_ids = [item.id for item in self.store.list_accounts()]
+        else:
+            account_ids = [self.account_id_from_input(account or "")]
+
+        settings = self.ensure_private_api_enabled("refresh")
+        provider = self.private_provider(settings)
+        results = []
+        summary = {"refreshed": 0, "skipped_no_auth": 0, "failed": 0, "cached": 0}
+        for account_id in account_ids:
+            if not self.store.account_meta_path(account_id).is_file():
+                summary["failed"] += 1
+                results.append({"account": account_id, "status": "missing"})
+                continue
+            auth_path = self.store.account_auth_path(account_id)
+            if not auth_path.is_file():
+                summary["skipped_no_auth"] += 1
+                results.append({"account": account_id, "status": "no-auth"})
+                continue
+            try:
+                auth_material = extract_auth_material(account_id, auth_path)
+                remote = provider.refresh_account(auth_material)
+                self.apply_remote_account_info(account_id, remote)
+                if remote.quota:
+                    self.write_quota_cache(account_id, auth_material, remote.quota)
+                    summary["cached"] += 1
+                summary["refreshed"] += 1
+                results.append({"account": account_id, "status": "ok", "remote": self.remote_info_to_dict(remote)})
+            except PrivateApiError as exc:
+                summary["failed"] += 1
+                results.append({"account": account_id, "status": "error", "error": str(exc)})
+        if json_output:
+            self.info(json.dumps({"summary": summary, "results": results}, ensure_ascii=False, indent=2, sort_keys=True))
+            return
+        if len(results) == 1 and results[0]["status"] == "ok":
+            account_id = results[0]["account"]
+            meta = self.store.read_account_meta(account_id)
+            quota = (results[0].get("remote") or {}).get("quota") or {}
+            self.info("Refreshed account:")
+            self.info(f"  account: {account_id}")
+            self.info(f"  email: {meta.email or 'unknown'}")
+            self.info(f"  plan: {meta.plan or 'unknown'}")
+            self.info(f"  quota: {self.percent_text(quota.get('used_percent'))}")
+            self.info(f"  reset_at: {quota.get('reset_at') or 'unknown'}")
+            self.info(f"  cached_at: {quota.get('fetched_at') or 'unknown'}")
+            return
+        self.info("Refresh Summary:")
+        for key in ("refreshed", "skipped_no_auth", "failed", "cached"):
+            self.info(f"  {key}: {summary[key]}")
+
+    def apply_remote_account_info(self, account_id: str, remote: AccountRemoteInfo) -> None:
+        meta = self.store.read_account_meta(account_id)
+        for field_name in ("email", "account_id", "user_id", "organization_id", "plan"):
+            value = getattr(remote, field_name)
+            if value:
+                setattr(meta, field_name, value)
+        meta.remote = dict(meta.remote or {})
+        meta.remote["last_refreshed_at"] = remote.fetched_at or iso_now()
+        meta.remote["provider"] = "codex"
+        if remote.quota:
+            meta.remote["quota_status"] = remote.quota.status
+            meta.remote["quota_used_percent"] = remote.quota.used_percent
+            meta.remote["quota_reset_at"] = remote.quota.reset_at
+        meta.updated_at = iso_now()
+        self.store.write_account_meta(meta)
+
+    def remote_info_to_dict(self, remote: AccountRemoteInfo) -> dict:
+        return {
+            "email": remote.email,
+            "account_id": remote.account_id,
+            "user_id": remote.user_id,
+            "organization_id": remote.organization_id,
+            "plan": remote.plan,
+            "fetched_at": remote.fetched_at,
+            "quota": remote.quota.to_dict() if remote.quota else None,
+        }
+
     def accounts_export(self, output_file: str, args: Sequence[str]) -> None:
         self.store.ensure_layout()
         include_auth = False
@@ -2336,6 +2764,13 @@ def usage(lang: str) -> str:
   codex-workspaces doctor
       输出路径、平台、App 控制、当前工作区和账号状态诊断。
 
+  codex-workspaces config get <配置项>
+  codex-workspaces config set <配置项> <值>
+      查看或设置本地工具配置，例如 experimental_private_api.*。
+
+  codex-workspaces quota [--json] [--no-cache]
+      实验性 private API：查询当前 active account 实时额度。默认关闭。
+
   codex-workspaces stats [summary|daily|models|workspaces|accounts] [工作区名]
       [--days 天数] [--from YYYY-MM-DD] [--to YYYY-MM-DD]
       [--workspace 工作区] [--account 账号] [--format table|json|markdown] [--no-color]
@@ -2370,6 +2805,9 @@ def usage(lang: str) -> str:
   codex-workspaces accounts init <账号>
   codex-workspaces accounts save <账号>
   codex-workspaces accounts refresh-meta <账号>|--all [--overwrite]
+  codex-workspaces accounts refresh [账号|--all] [--json]
+  codex-workspaces accounts quota <账号> [--json] [--no-cache]
+  codex-workspaces accounts list -a [--json] [--no-cache] [--verbose]
   codex-workspaces accounts export <备份文件> [--all|--account <账号>] [--include-auth] [--yes]
   codex-workspaces accounts import <备份文件> [--dry-run] [--rename-conflicts|--overwrite]
   codex-workspaces accounts add <账号> --login [--timeout 秒] [--keep-temp]
@@ -2384,6 +2822,7 @@ def usage(lang: str) -> str:
   codex-workspaces accounts import-workspaces
   codex-workspaces accounts import-legacy <旧账号目录>
       管理 auth.json 账号快照。auth 元信息解析是本地 best-effort，不访问私有接口。
+      quota/refresh 是实验性 private API 功能，默认关闭，失败不影响本地切换。
 
   codex-workspaces rename <旧工作区名> <新工作区名>
       重命名工作区；如果重命名当前工作区，会同步更新当前链接。
@@ -2429,6 +2868,13 @@ Usage:
   codex-workspaces doctor
       Print path, platform, app-control, current workspace, and account diagnostics.
 
+  codex-workspaces config get <key>
+  codex-workspaces config set <key> <value>
+      Read or write local tool configuration, such as experimental_private_api.*.
+
+  codex-workspaces quota [--json] [--no-cache]
+      Experimental private API: query realtime quota for the current active account. Disabled by default.
+
   codex-workspaces stats [summary|daily|models|workspaces|accounts] [workspace]
       [--days days] [--from YYYY-MM-DD] [--to YYYY-MM-DD]
       [--workspace workspace] [--account account] [--format table|json|markdown] [--no-color]
@@ -2463,6 +2909,9 @@ Usage:
   codex-workspaces accounts init <account>
   codex-workspaces accounts save <account>
   codex-workspaces accounts refresh-meta <account>|--all [--overwrite]
+  codex-workspaces accounts refresh [account|--all] [--json]
+  codex-workspaces accounts quota <account> [--json] [--no-cache]
+  codex-workspaces accounts list -a [--json] [--no-cache] [--verbose]
   codex-workspaces accounts export <backup-file> [--all|--account <account>] [--include-auth] [--yes]
   codex-workspaces accounts import <backup-file> [--dry-run] [--rename-conflicts|--overwrite]
   codex-workspaces accounts add <account> --login [--timeout seconds] [--keep-temp]
@@ -2477,6 +2926,7 @@ Usage:
   codex-workspaces accounts import-workspaces
   codex-workspaces accounts import-legacy <legacy-accounts-dir>
       Manage auth.json account snapshots. Auth metadata parsing is local best-effort and never calls private APIs.
+      quota/refresh are experimental private API features, disabled by default, and never required for local switching.
 
   codex-workspaces rename <old-workspace> <new-workspace>
       Rename a workspace. If it is active, the active link is updated.

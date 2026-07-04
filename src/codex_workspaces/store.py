@@ -6,7 +6,7 @@ import json
 import os
 import shutil
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Optional
@@ -74,6 +74,7 @@ class AccountMeta:
     updated_at: str
     last_used_at: Optional[str] = None
     notes: str = ""
+    remote: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -92,6 +93,7 @@ class AccountMeta:
             "updated_at": self.updated_at,
             "last_used_at": self.last_used_at,
             "notes": self.notes,
+            "remote": self.remote,
         }
 
     @classmethod
@@ -112,6 +114,7 @@ class AccountMeta:
             updated_at=str(data.get("updated_at") or now),
             last_used_at=data.get("last_used_at"),
             notes=str(data.get("notes") or ""),
+            remote=dict(data.get("remote") or {}),
         )
 
 
@@ -125,6 +128,7 @@ class WorkspaceStore:
             self.config.workspaces_dir,
             self.config.accounts_dir,
             self.config.backups_dir,
+            self.config.cache_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
             chmod_best_effort(directory, 0o700)
@@ -142,7 +146,21 @@ class WorkspaceStore:
                 "root": str(self.config.root_dir),
                 "workspaces_dir": "workspaces",
                 "accounts_dir": "accounts",
+                "cache_dir": "cache",
                 "current_link": str(self.config.active_link),
+                "experimental_private_api": {
+                    "enabled": False,
+                    "quota_enabled": False,
+                    "refresh_enabled": False,
+                    "provider": "codex",
+                    "base_url": "",
+                    "quota_endpoint": "",
+                    "account_endpoint": "",
+                    "timeout_seconds": 10,
+                    "rate_limit_per_minute": 20,
+                    "cache_ttl_seconds": 300,
+                    "redact_sensitive_logs": True,
+                },
                 "default_restore_policy": "workspace-default",
                 "backup_before_switch": True,
                 "backup_before_migrate": True,

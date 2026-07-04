@@ -184,6 +184,52 @@ codex-workspaces stats work --days 14
 
 `stats` 只读取本地 SQLite 状态文件。无法识别的 workspace/account/model 会显示为 `unknown`；统计结果取决于各工作区里实际存在的 Codex 本地文件。
 
+## 实验性实时额度查询
+
+`codex-workspaces` 可以通过实验性 private API provider 查询已管理账号的实时额度。
+
+该功能默认关闭，依赖 Codex/OpenAI 内部接口，可能随上游变化而失效，也可能返回 `401`/`403`/`429`。它不是 workspace/account 本地切换的依赖。
+
+显式开启：
+
+```bash
+codex-workspaces config set experimental_private_api.enabled true
+codex-workspaces config set experimental_private_api.quota_enabled true
+codex-workspaces config set experimental_private_api.refresh_enabled true
+```
+
+查询当前账号额度：
+
+```bash
+codex-workspaces quota
+codex-workspaces quota --json
+```
+
+查询指定账号额度：
+
+```bash
+codex-workspaces accounts quota acct_work
+```
+
+查询所有账号额度：
+
+```bash
+codex-workspaces accounts list -a
+codex-workspaces accounts list --all-with-quota --json
+```
+
+刷新账号远端信息和 quota cache：
+
+```bash
+codex-workspaces accounts refresh
+codex-workspaces accounts refresh acct_work
+codex-workspaces accounts refresh --all --json
+```
+
+实时额度能力使用显式实验配置、请求超时、串行账号遍历和本地 TTL 缓存，缓存目录为 `~/.codex-workspaces/cache/quota/`。缓存只保存额度摘要和 auth hash，不保存 token、cookie、authorization header 或原始 `auth.json`。
+
+`stats` 和 `quota` 不同：`stats` 是本地 SQLite 历史统计，`quota` 是实时远端查询。额度查询失败不会影响本地 workspace/account 切换。
+
 在当前工作区临时切换账号：
 
 ```bash

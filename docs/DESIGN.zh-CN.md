@@ -94,7 +94,10 @@ Windows：
 - 如果当前 `~/.codex` 是真实目录，批量 `migrate` 会拒绝覆盖；应使用 `init <name> --migrate-current` 显式迁移当前目录。
 - `stats` 只以 read-only SQLite URI 读取 `state_*.sqlite`，不写入 Codex 数据库。
 - `stats` 聚合每日、模型、workspace、account 维度；无法推断的 workspace/account/model 显示为 `unknown`。
-- 不实现 `quota`/`refresh` 这类依赖私有接口或私有行为的功能。
+- 默认不启用 `quota`/`refresh` 这类依赖私有接口或私有行为的能力；只作为显式开启的实验功能提供。
+- 实验性 `quota` / `accounts list -a` / `accounts refresh` 是显式开启的 private API capability；默认关闭，失败隔离，不参与 workspace/account 切换。
+- private API provider 只在配置中开启且配置 endpoint 或注入 provider 后使用；请求有 timeout，错误会脱敏，输出和 cache 不包含 token/cookie/authorization。
+- quota cache 存放在 `~/.codex-workspaces/cache/quota/`，按 TTL 和 auth_hash 失效，只保存 quota 摘要。
 - macOS 上迁移前必须确认 Codex App 未运行。
 - Codex 内置 Terminal 中的危险命令要么转交外部 Terminal，要么拒绝。
 - 任何切换都只替换 active link，不删除 workspace 目录。
@@ -119,6 +122,11 @@ Windows：
 - `codex-workspaces accounts export <backup.tar.gz> [--all|--account <account>] [--include-auth] [--yes]`
 - `codex-workspaces accounts import <backup.tar.gz> [--dry-run] [--rename-conflicts|--overwrite]`
 - `codex-workspaces stats [summary|daily|models|workspaces|accounts] [--format table|json|markdown]`
+- `codex-workspaces config get/set experimental_private_api.*`
+- `codex-workspaces quota [--json] [--no-cache]`
+- `codex-workspaces accounts quota <account> [--json] [--no-cache]`
+- `codex-workspaces accounts list -a [--json] [--no-cache] [--verbose]`
+- `codex-workspaces accounts refresh [account|--all] [--json]`
 - `codex-workspaces accounts import-workspaces`
 - `codex-workspaces accounts import-legacy <legacy_accounts_dir>`
 
