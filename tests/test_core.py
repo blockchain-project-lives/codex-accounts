@@ -109,6 +109,12 @@ def make_manager(tmp_path: Path, platform: FakePlatform | None = None, lang: str
     return manager, stdout, stderr
 
 
+def assert_secure_file_mode(path: Path) -> None:
+    assert path.is_file()
+    if os.name == "posix":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
 class MockPrivateApiProvider:
     def __init__(self) -> None:
         self.quota_calls = []
@@ -674,9 +680,7 @@ class TestWorkspaceManager:
 
         manager.accounts_export(str(backup), ["--include-auth", "--yes", "--account", "work"])
 
-        assert backup.is_file()
-        if os.name == "posix":
-            assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+        assert_secure_file_mode(backup)
         with tarfile.open(backup, "r:gz") as archive:
             names = archive.getnames()
         assert "codex-workspaces-accounts-backup/accounts/acct_work/auth.json" in names
@@ -687,8 +691,7 @@ class TestWorkspaceManager:
         assert "will import:" in imported_stdout.getvalue()
 
         imported.accounts_import_backup(str(backup), [])
-        assert imported.store.account_auth_path("acct_work").is_file()
-        assert stat.S_IMODE(imported.store.account_auth_path("acct_work").stat().st_mode) == 0o600
+        assert_secure_file_mode(imported.store.account_auth_path("acct_work"))
         assert imported.store.read_account_meta("acct_work").email == "work@example.com"
 
         imported.accounts_import_backup(str(backup), [])
