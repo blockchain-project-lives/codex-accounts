@@ -32,7 +32,7 @@ CODEX_DELEGATE_UNSET_ENV = (
     "__CFBundleIdentifier",
 )
 
-FORCE_QUIT_GRACE_SECONDS = 5
+FORCE_QUIT_GRACE_SECONDS = 15
 
 
 class SystemPlatform:
