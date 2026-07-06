@@ -4,6 +4,12 @@ All notable changes to `codex-workspaces` will be documented in this file.
 
 This project follows a simple changelog format while it is still pre-release.
 
+## 0.3.5 - 2026-07-06
+
+### Fixed
+
+- Fixed `accounts info "$(codex-workspaces accounts current)"` compatibility by extracting `active=acct_*` from the human-readable current-account output.
+
 ## 0.3.4 - 2026-07-04
 
 ### Added

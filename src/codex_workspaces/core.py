@@ -1556,6 +1556,9 @@ class WorkspaceManager:
         self.store.touch_account_used(account_id)
 
     def account_id_from_input(self, value: str) -> str:
+        current_output_account_id = self.account_id_from_current_output(value)
+        if current_output_account_id:
+            return current_output_account_id
         clean = strip_workspace_name(value)
         if clean.startswith("acct_"):
             validate_workspace_name(clean)
@@ -1563,6 +1566,16 @@ class WorkspaceManager:
             return clean
         validate_workspace_name(clean)
         return "acct_" + clean
+
+    def account_id_from_current_output(self, value: str) -> Optional[str]:
+        for key in ("active", "default"):
+            match = re.search(rf"(?:^|\s){key}=(acct_[A-Za-z0-9][A-Za-z0-9._-]{{0,63}})(?=\s|$)", value.strip())
+            if match:
+                account_id = match.group(1)
+                validate_workspace_name(account_id)
+                validate_workspace_name(account_id[len("acct_") :])
+                return account_id
+        return None
 
     def account_name_from_input(self, value: str) -> str:
         clean = strip_workspace_name(value)

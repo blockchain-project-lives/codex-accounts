@@ -176,6 +176,17 @@ class TestCliDispatch:
 
         manager.stdout.seek(0)
         manager.stdout.truncate(0)
+        assert run(["accounts", "current"], manager) == 0
+        human_current = manager.stdout.getvalue().strip()
+        assert human_current == "work: active=acct_work default=acct_work"
+
+        manager.stdout.seek(0)
+        manager.stdout.truncate(0)
+        assert run(["accounts", "info", human_current], manager) == 0
+        assert "Account: acct_work" in manager.stdout.getvalue()
+
+        manager.stdout.seek(0)
+        manager.stdout.truncate(0)
         assert run(["accounts", "info", account_id], manager) == 0
         assert "Account: acct_work" in manager.stdout.getvalue()
 
