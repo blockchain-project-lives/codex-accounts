@@ -17,11 +17,14 @@ from .errors import (
     PrivateApiRateLimitedError,
     PrivateApiUnsupportedResponseError,
 )
-from .models import AccountRemoteInfo, AuthMaterial, QuotaInfo
+from .models import AccountRemoteInfo, AuthMaterial, QuotaInfo, ResetCreditEntry, ResetCreditsInfo
 
 
 class PrivateApiProvider(Protocol):
     def get_quota(self, auth: AuthMaterial) -> QuotaInfo:
+        ...
+
+    def get_reset_credits(self, auth: AuthMaterial) -> ResetCreditsInfo:
         ...
 
     def refresh_account(self, auth: AuthMaterial) -> AccountRemoteInfo:
@@ -34,12 +37,14 @@ class ConfiguredHttpPrivateApiProvider:
         *,
         base_url: str | None,
         quota_endpoint: str | None,
+        reset_credits_endpoint: str | None,
         account_endpoint: str | None,
         timeout_seconds: int,
         user_agent: str,
     ) -> None:
         self.base_url = base_url
         self.quota_endpoint = quota_endpoint
+        self.reset_credits_endpoint = reset_credits_endpoint
         self.account_endpoint = account_endpoint
         self.timeout_seconds = timeout_seconds
         self.user_agent = user_agent
@@ -49,6 +54,12 @@ class ConfiguredHttpPrivateApiProvider:
             raise PrivateApiUnsupportedResponseError("quota endpoint is not configured")
         data = self.request_json(self.quota_endpoint, auth)
         return quota_from_response(data)
+
+    def get_reset_credits(self, auth: AuthMaterial) -> ResetCreditsInfo:
+        if not self.base_url or not self.reset_credits_endpoint:
+            raise PrivateApiUnsupportedResponseError("reset credits endpoint is not configured")
+        data = self.request_json(self.reset_credits_endpoint, auth)
+        return reset_credits_from_response(data)
 
     def refresh_account(self, auth: AuthMaterial) -> AccountRemoteInfo:
         if not self.base_url or not self.account_endpoint:
@@ -174,6 +185,32 @@ def quota_from_response(data: dict) -> QuotaInfo:
     )
 
 
+def reset_credits_from_response(data: dict) -> ResetCreditsInfo:
+    credits_data = data.get("credits")
+    if not isinstance(credits_data, list):
+        credits_data = data.get("items") if isinstance(data.get("items"), list) else []
+    credits: list[ResetCreditEntry] = []
+    for item in credits_data:
+        if not isinstance(item, dict):
+            continue
+        credits.append(
+            ResetCreditEntry(
+                status=as_text(item.get("status")),
+                title=as_text(item.get("title")),
+                granted_at=normalize_datetime_text(item.get("granted_at") or item.get("grantedAt")),
+                expires_at=normalize_datetime_text(item.get("expires_at") or item.get("expiresAt")),
+            )
+        )
+    available_count = first_int(data, "available_count", "availableCount")
+    if available_count is None:
+        available_count = sum(1 for credit in credits if credit.status == "available")
+    return ResetCreditsInfo(
+        available_count=available_count,
+        credits=credits,
+        fetched_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+
 def normalize_reset_at(value) -> str | None:
     if isinstance(value, str) and value:
         return value
@@ -197,6 +234,21 @@ def reset_after_to_iso(value: float | None) -> str | None:
     return (datetime.now(timezone.utc) + timedelta(seconds=value)).isoformat()
 
 
+def normalize_datetime_text(value) -> str | None:
+    if isinstance(value, str) and value:
+        try:
+            timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return value
+        return timestamp.astimezone().isoformat()
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value), tz=timezone.utc).astimezone().isoformat()
+        except (OSError, OverflowError, ValueError):
+            return str(value)
+    return None
+
+
 def wham_plan(credits) -> str | None:
     if not isinstance(credits, dict):
         return None
@@ -212,6 +264,12 @@ def pick(data: dict, *keys: str) -> str | None:
         value = data.get(key)
         if isinstance(value, str) and value:
             return value
+    return None
+
+
+def as_text(value) -> str | None:
+    if isinstance(value, str) and value:
+        return value
     return None
 
 

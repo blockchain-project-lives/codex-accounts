@@ -19,8 +19,8 @@ from codex_workspaces.core import WorkspaceManager, strip_workspace_name, valida
 from codex_workspaces.errors import CodexWorkspacesError
 from codex_workspaces.private_api.errors import PrivateApiAuthError, PrivateApiForbiddenError, PrivateApiNetworkError, PrivateApiRateLimitedError, PrivateApiUnsupportedResponseError
 from codex_workspaces.private_api.auth import extract_auth_material
-from codex_workspaces.private_api.client import ConfiguredHttpPrivateApiProvider, quota_from_response
-from codex_workspaces.private_api.models import AccountRemoteInfo, QuotaInfo
+from codex_workspaces.private_api.client import ConfiguredHttpPrivateApiProvider, quota_from_response, reset_credits_from_response
+from codex_workspaces.private_api.models import AccountRemoteInfo, QuotaInfo, ResetCreditsInfo, ResetCreditEntry
 import codex_workspaces.platforms as platforms_module
 from codex_workspaces.platforms import SystemPlatform
 
@@ -59,9 +59,11 @@ class FakePlatform(SystemPlatform):
 
     def stop_app(self, app_name: str, timeout: int, force: bool, stdout) -> None:
         self.stop_calls.append((app_name, timeout, force))
+        self._app_running = False
 
     def start_app(self, app_name: str) -> None:
         self.start_calls.append(app_name)
+        self._app_running = True
 
     def delegate_to_external_terminal(self, config, action, argv, stdout) -> None:
         self.delegate_calls.append((action, list(argv)))
@@ -147,16 +149,35 @@ def unsigned_jwt(payload: dict) -> str:
 class MockPrivateApiProvider:
     def __init__(self) -> None:
         self.quota_calls = []
+        self.reset_credits_calls = []
         self.refresh_calls = []
         self.quota_error = None
+        self.reset_credits_error = None
         self.refresh_error = None
         self.quota = QuotaInfo(status="ok", used_percent=72.0, remaining_percent=28.0, reset_at="2026-07-05T04:00:00+08:00", plan="Plus")
+        self.reset_credits = ResetCreditsInfo(
+            available_count=1,
+            credits=[
+                ResetCreditEntry(
+                    status="available",
+                    title="Daily reset",
+                    granted_at="2026-07-07T00:00:00+08:00",
+                    expires_at="2026-07-08T00:00:00+08:00",
+                )
+            ],
+        )
 
     def get_quota(self, auth):
         self.quota_calls.append(auth)
         if self.quota_error:
             raise self.quota_error
         return self.quota
+
+    def get_reset_credits(self, auth):
+        self.reset_credits_calls.append(auth)
+        if self.reset_credits_error:
+            raise self.reset_credits_error
+        return self.reset_credits
 
     def refresh_account(self, auth):
         self.refresh_calls.append(auth)
@@ -430,16 +451,27 @@ class TestWorkspaceManager:
         assert manager.store.account_auth_path("acct_personal").read_text(encoding="utf-8") == '{"account":"current"}\n'
         assert any(manager.config.backups_dir.glob("*/before-migrate/codex/auth.json"))
 
-    def test_default_switch_skips_app_control_on_non_macos_platforms(self, tmp_path: Path) -> None:
+    def test_default_switch_skips_app_control_when_no_process_is_found(self, tmp_path: Path) -> None:
         manager, stdout, _ = make_manager(tmp_path, FakePlatform(app_control=False))
         manager.init_workspace("work", [])
 
         manager.switch_workspace("work", [], ["switch", "work"])
 
         output = stdout.getvalue()
-        assert "App stop is not supported on this platform" in output
-        assert "App start is not supported on this platform" in output
+        assert "No running Codex app process was found" in output
+        assert "No previously running Codex app process was recorded" in output
         assert manager.current_target().kind == "target"
+
+    def test_default_switch_controls_process_app_when_found_on_non_macos(self, tmp_path: Path) -> None:
+        platform = FakePlatform(app_control=False, app_running=True)
+        manager, stdout, _ = make_manager(tmp_path, platform)
+        manager.init_workspace("work", [])
+
+        manager.switch_workspace("work", [], ["switch", "work"])
+
+        assert platform.stop_calls == [("Codex", 20, False)]
+        assert platform.start_calls == ["Codex"]
+        assert "Switched to: work" in stdout.getvalue()
 
     def test_default_switch_uses_app_control_when_supported(self, tmp_path: Path) -> None:
         platform = FakePlatform(app_control=True)
@@ -793,9 +825,11 @@ class TestWorkspaceManager:
         defaults = manager.default_private_api_config()
         assert defaults["base_url"] == "https://chatgpt.com"
         assert defaults["quota_endpoint"] == "/backend-api/wham/usage"
+        assert defaults["reset_credits_endpoint"] == "/backend-api/wham/rate-limit-reset-credits"
         assert defaults["account_endpoint"] == ""
         assert defaults["enabled"] is False
         assert defaults["quota_enabled"] is False
+        assert defaults["reset_credits_enabled"] is False
         legacy_config = manager.read_tool_config()
         legacy_config["experimental_private_api"]["base_url"] = ""
         legacy_config["experimental_private_api"]["quota_endpoint"] = ""
@@ -897,6 +931,7 @@ class TestWorkspaceManager:
         provider = ConfiguredHttpPrivateApiProvider(
             base_url="https://chatgpt.com",
             quota_endpoint="/backend-api/wham/usage",
+            reset_credits_endpoint="/backend-api/wham/rate-limit-reset-credits",
             account_endpoint=None,
             timeout_seconds=7,
             user_agent="codex-workspaces/test",
@@ -919,6 +954,7 @@ class TestWorkspaceManager:
         provider = ConfiguredHttpPrivateApiProvider(
             base_url="https://chatgpt.com",
             quota_endpoint="/backend-api/wham/usage",
+            reset_credits_endpoint="/backend-api/wham/rate-limit-reset-credits",
             account_endpoint=None,
             timeout_seconds=7,
             user_agent="codex-workspaces/test",
@@ -1057,6 +1093,84 @@ class TestWorkspaceManager:
         assert quota.remaining_percent == 75.0
         assert quota.window_duration_mins == 180
         assert quota.plan == "Plus"
+
+    def test_reset_credits_from_response_parses_and_localizes(self) -> None:
+        info = reset_credits_from_response(
+            {
+                "available_count": 2,
+                "credits": [
+                    {
+                        "id": "credit-secret-id",
+                        "status": "available",
+                        "title": "Daily reset",
+                        "granted_at": "2026-07-06T16:00:00Z",
+                        "expires_at": "2026-07-07T16:00:00Z",
+                    }
+                ],
+            }
+        )
+
+        assert info.available_count == 2
+        assert info.credits is not None
+        assert info.credits[0].status == "available"
+        assert info.credits[0].title == "Daily reset"
+        assert info.credits[0].granted_at == datetime.fromisoformat("2026-07-06T16:00:00+00:00").astimezone().isoformat()
+        assert info.credits[0].expires_at == datetime.fromisoformat("2026-07-07T16:00:00+00:00").astimezone().isoformat()
+
+    def test_accounts_info_shows_reset_credits_when_enabled(self, tmp_path: Path) -> None:
+        provider = MockPrivateApiProvider()
+        manager, stdout, _ = make_manager(tmp_path, private_api_provider=provider)
+        manager.init_workspace("work", [])
+        manager.switch_workspace("work", ["--no-stop", "--no-start"], ["switch", "work"])
+        (manager.workspace_dir("work") / "auth.json").write_text(chatgpt_auth_json(), encoding="utf-8")
+        manager.accounts_save("work")
+        manager.accounts_set_default("work", "work", activate=True)
+        manager.config_set("experimental_private_api.enabled", "true")
+        manager.config_set("experimental_private_api.quota_enabled", "true")
+        manager.config_set("experimental_private_api.reset_credits_enabled", "true")
+        stdout.seek(0)
+        stdout.truncate(0)
+
+        manager.accounts_info("work")
+
+        output = stdout.getvalue()
+        assert "Summary:" in output
+        assert "Workspace References:" in output
+        assert "Identifiers:" in output
+        assert "Paths:" in output
+        assert "Experimental:" in output
+        assert "private_api:" in output
+        assert "quota_enabled: yes" in output
+        assert "quota:" in output
+        assert "reset_credits:" in output
+        assert "available_count: 1" in output
+        assert "status: available" in output
+        assert "title: Daily reset" in output
+        assert "credit-secret-id" not in output
+        assert provider.quota_calls
+        assert provider.reset_credits_calls
+
+    def test_accounts_info_shows_reset_credits_error_without_traceback(self, tmp_path: Path) -> None:
+        provider = MockPrivateApiProvider()
+        provider.reset_credits_error = PrivateApiAuthError("unauthorized bearer secret-token")
+        manager, stdout, _ = make_manager(tmp_path, private_api_provider=provider)
+        manager.init_workspace("work", [])
+        manager.switch_workspace("work", ["--no-stop", "--no-start"], ["switch", "work"])
+        (manager.workspace_dir("work") / "auth.json").write_text(chatgpt_auth_json(), encoding="utf-8")
+        manager.accounts_save("work")
+        manager.accounts_set_default("work", "work", activate=True)
+        manager.config_set("experimental_private_api.enabled", "true")
+        manager.config_set("experimental_private_api.reset_credits_enabled", "true")
+        stdout.seek(0)
+        stdout.truncate(0)
+
+        manager.accounts_info("work")
+
+        output = stdout.getvalue()
+        assert "Experimental:" in output
+        assert "reset_credits:" in output
+        assert "error: unauthorized" in output
+        assert "secret-token" not in output
 
     def test_restore_policy_last_active_keeps_workspace_active_account(self, tmp_path: Path) -> None:
         manager, _, _ = make_manager(tmp_path, restore_policy="last-active")

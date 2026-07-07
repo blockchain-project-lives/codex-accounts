@@ -9,7 +9,7 @@ The project now has two entry points:
 - A cross-platform Python 3 CLI for Linux, macOS, and Windows.
 - The original macOS Bash script, still kept at [`macos/codex-workspaces`](macos/codex-workspaces), for users who installed the shell workflow directly.
 
-On macOS, the Python CLI preserves the original app workflow: stop Codex App, switch the workspace link, and start Codex App again. On Linux and Windows, app control is skipped and the CLI only switches the workspace link.
+On macOS, the Python CLI preserves the original app workflow: stop Codex App, switch the workspace link, and start Codex App again. On Linux and Windows, the CLI checks the process list first; if Codex is running, it records the process command, stops it, switches the workspace link, and starts it again. If no process is found, it only switches the workspace link.
 
 ## Features
 
@@ -23,7 +23,7 @@ On macOS, the Python CLI preserves the original app workflow: stop Codex App, sw
 - Export and import account snapshot backups with explicit warnings for credential-bearing archives.
 - Inspect workspace/account metadata and run account-focused `doctor` diagnostics.
 - Migrate older `~/.codex-<name>` workspaces and import legacy `~/.codex-accounts` auth snapshots.
-- Keep macOS Codex App stop/start/restart support.
+- Keep macOS Codex App stop/start/restart support, with best-effort process-based stop/start on Linux and Windows when a running Codex process is found.
 - Show local token usage stats from Codex `state_*.sqlite` in read-only mode, including daily, model, workspace, account, JSON, and Markdown views.
 - Block unsafe operations from a detected Codex built-in terminal when they cannot be delegated safely.
 - Support English and Chinese output through `CODEX_WORKSPACES_LANG`.
@@ -32,7 +32,7 @@ On macOS, the Python CLI preserves the original app workflow: stop Codex App, sw
 ## Requirements
 
 - Python 3.9 or newer for the Python CLI.
-- macOS is required only for Codex App control commands: `start`, `stop`, and `restart`.
+- macOS has native Codex App control; Linux and Windows use best-effort process detection for `start`, `stop`, and `restart`.
 - Linux and macOS use directory symlinks.
 - Windows uses directory symlinks when available and falls back to directory junctions.
 
@@ -86,6 +86,23 @@ Default layout:
 ```
 
 Customize paths with `CODEX_WORKSPACES_LINK` and `CODEX_WORKSPACES_ROOT`.
+
+## Repository Structure
+
+The repo is organized around a small Python core plus platform-specific helpers:
+
+- `src/codex_workspaces/cli.py`: command-line parsing and command dispatch.
+- `src/codex_workspaces/core.py`: main workflows for workspace switching, accounts, migration, doctor, stats, and config.
+- `src/codex_workspaces/store.py`: metadata persistence, workspace/account layout, and secure file writes.
+- `src/codex_workspaces/platforms.py`: macOS app control plus Linux/Windows process discovery and restart behavior.
+- `src/codex_workspaces/private_api/`: experimental realtime quota and reset-credits provider, auth extraction, models, and error types.
+- `src/codex_workspaces/stats.py`: local SQLite usage stats parsing and aggregation.
+- `src/codex_workspaces/auth_inspector.py`: best-effort local `auth.json` parsing without network requests.
+- `macos/`: the legacy Bash implementation and its own readme.
+- `docs/`: design, testing, and release notes.
+- `tests/`: unit and CLI coverage for the Python package.
+
+If you want to understand the tool quickly, reading order is usually `cli.py -> core.py -> store.py -> private_api/`.
 
 ## Usage
 
@@ -160,7 +177,7 @@ codex-workspaces use personal
 codex-workspaces switch work
 ```
 
-On macOS, switching stops and restarts Codex App by default. Skip those steps when needed:
+On macOS, switching stops and restarts Codex App by default. On Linux and Windows, switching does the same only when a running Codex process can be found and recorded. Skip those steps when needed:
 
 ```bash
 codex-workspaces work --no-stop --no-start
@@ -184,24 +201,32 @@ codex-workspaces stats work --days 14
 
 `stats` only reads local SQLite state. Missing or unrecognized workspace/account/model data is shown as `unknown`; results are best-effort and depend on the local Codex files available in each workspace.
 
-## Experimental Realtime Quota
+## Experimental Realtime Account Data
 
-`codex-workspaces` can optionally query realtime quota for managed accounts through an experimental private API provider.
+`codex-workspaces` can optionally query experimental realtime account data for managed accounts through a private API provider.
 
-This feature is disabled by default. It may break when upstream Codex/OpenAI internals change, may return `401`/`403`/`429`, and is not required for workspace or account switching.
+These features are disabled by default. They may break when upstream Codex/OpenAI internals change, may return `401`/`403`/`429`, and are not required for workspace or account switching.
 
 Enable explicitly:
 
 ```bash
 codex-workspaces config set experimental_private_api.enabled true
 codex-workspaces config set experimental_private_api.quota_enabled true
+codex-workspaces config set experimental_private_api.reset_credits_enabled true
 ```
 
-The current endpoint fields are:
+Switches and endpoint fields:
 
+- `experimental_private_api.enabled`: master switch. When off, no experimental account lookups run.
+- `experimental_private_api.quota_enabled`: enables realtime WHAM quota lookup.
+- `experimental_private_api.reset_credits_enabled`: enables reset credits lookup and includes that block in `accounts info`.
+- `experimental_private_api.refresh_enabled`: reserved for explicit remote refresh flows; still off by default.
 - `experimental_private_api.base_url` defaults to `https://chatgpt.com`
 - `experimental_private_api.quota_endpoint` defaults to `/backend-api/wham/usage`
+- `experimental_private_api.reset_credits_endpoint` defaults to `/backend-api/wham/rate-limit-reset-credits`
 - `experimental_private_api.account_endpoint` defaults to an empty string
+
+When the master switch is on, `accounts info <account>` shows a dedicated `Experimental` section. Enabled features render their live data as nested blocks, so local metadata and experimental metadata stay clearly separated.
 
 Query current account quota:
 
@@ -214,6 +239,7 @@ Query a specific managed account:
 
 ```bash
 codex-workspaces accounts quota acct_work
+codex-workspaces accounts info acct_work
 ```
 
 Query all accounts with quota:
@@ -234,6 +260,8 @@ codex-workspaces accounts refresh --all --json
 Refresh remains disabled by default. The current `account_endpoint` is not the Codex responses API; do not point it at the responses endpoint unless the provider logic is updated to support that POST-based flow.
 
 Realtime quota uses explicit experimental configuration, timeout, serial account iteration, and a local TTL cache under `~/.codex-workspaces/cache/quota/`. The cache stores quota summaries and auth hashes only; it does not store tokens, cookies, authorization headers, or raw `auth.json`.
+
+When `experimental_private_api.reset_credits_enabled` is true, `accounts info <account>` shows reset credits with local-time grant and expiry timestamps. The output intentionally omits credit IDs and other unique identifiers. When `experimental_private_api.quota_enabled` is also true, the same command includes a nested quota block as well.
 
 `stats` and `quota` are different: `stats` is local historical usage from SQLite, while `quota` is a realtime remote lookup. Quota failures do not affect local workspace/account switching.
 
@@ -268,7 +296,7 @@ codex-workspaces rename work main
 codex-workspaces delete old-workspace --force
 ```
 
-Control Codex App on macOS:
+Control Codex App:
 
 ```bash
 codex-workspaces stop
@@ -282,7 +310,7 @@ codex-workspaces restart
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `CODEX_APP_NAME` | `Codex` | macOS app name to control. |
+| `CODEX_APP_NAME` | `Codex` | macOS app name and Linux/Windows process name to control. |
 | `CODEX_QUIT_TIMEOUT` | `20` | Seconds to wait for app exit. |
 | `CODEX_WORKSPACES_LINK` | `$HOME/.codex` | Active workspace link path. |
 | `CODEX_WORKSPACES_ROOT` | `$HOME/.codex-workspaces` | Managed root for workspaces, accounts, backups, and lock file. |

@@ -11,7 +11,7 @@ Python 版的目标是在保留 shell 脚本的情况下，提供可测试、可
 - 保持现有命令语义：`list`、`current`、`init`、`stats`、`switch/use`、工作区名快捷切换、`stop/start/restart`。
 - 工作区目录管理跨平台可用。
 - macOS App 控制保留原行为。
-- 非 macOS 平台不执行 App 启停，只切换工作区链接。
+- Linux/Windows 平台先检查进程列表；找到 Codex 进程时记录启动命令、停止进程、切换链接、再恢复启动，找不到进程时只切换工作区链接。
 - 支持 PyPI 安装和 `python -m codex_workspaces`。
 - 核心逻辑可单元测试，不依赖真实 Codex App。
 
@@ -19,7 +19,7 @@ Python 版的目标是在保留 shell 脚本的情况下，提供可测试、可
 
 - 不读取、修改或解析 Codex 配置文件内容。
 - 不同步工作区数据，不做备份恢复系统。
-- 不在 Linux/Windows 上模拟 Codex App 启停。
+- 不在 Linux/Windows 上调用 macOS App 控制；只做基于进程列表的 best-effort 启停。
 - 不删除任何工作区目录，切换时只替换当前工作区链接。
 
 ## 代码结构
@@ -28,10 +28,12 @@ Python 版的目标是在保留 shell 脚本的情况下，提供可测试、可
 src/codex_workspaces/
   cli.py         命令分发和进程入口
   config.py      环境变量、默认路径、语言检测
-  core.py        工作区目录、链接切换、账号绑定和安装器逻辑
+  core.py        工作区目录、链接切换、账号绑定、实验能力汇总和安装器逻辑
   store.py       统一目录、元数据、账号快照和锁
   stats.py       只读 Codex SQLite 的本地 token 统计
   platforms.py   平台差异：App 控制、Terminal 转交、目录链接
+  auth_inspector.py   本地 auth.json 元信息解析
+  private_api/   实验性 quota / reset credits / refresh provider
   errors.py      可预期命令错误
 ```
 
@@ -67,15 +69,15 @@ macOS：
 Linux：
 
 - 工作区切换使用目录软链接。
-- `switch` 默认跳过 App stop/start，并输出提示。
-- 直接执行 `stop/start/restart` 会报“仅 macOS 支持”。
+- `switch` 会先检查进程列表；找到 Codex 进程时执行 stop/link/start，找不到进程时输出提示并只切换链接。
+- `stop/start/restart` 使用已发现的进程和记录的命令做 best-effort 控制。
 
 Windows：
 
 - 优先创建目录 symlink。
 - 如果 symlink 权限不可用，回退到 `cmd /c mklink /J` 创建 junction。
 - 删除当前链接时只删除被识别为 symlink/junction 的路径，拒绝删除真实目录。
-- App 控制命令不支持。
+- App 控制使用 Windows 进程列表做 best-effort 启停；找不到 Codex 进程时不阻止工作区链接切换。
 
 ## 安全设计
 
@@ -108,6 +110,19 @@ Windows：
 
 - 变量：`CODEX_WORKSPACES_ROOT`、`CODEX_WORKSPACES_LINK`、`CODEX_WORKSPACES_WORKSPACES_DIR`、`CODEX_WORKSPACES_ACCOUNTS_DIR`、`CODEX_WORKSPACES_RESTORE_POLICY`、`CODEX_WORKSPACES_LANG`。
 - `CODEX_WORKSPACES_RESTORE_POLICY` 可选 `workspace-default`、`last-active`、`keep-current`；无效值回退到 `workspace-default`。
+
+实验性 private API 配置：
+
+- `experimental_private_api.enabled`：总开关。
+- `experimental_private_api.quota_enabled`：开启实时 WHAM quota 查询。
+- `experimental_private_api.reset_credits_enabled`：开启 reset credits 查询。
+- `experimental_private_api.refresh_enabled`：预留给显式 refresh 流程，默认关闭。
+- `experimental_private_api.base_url`：默认 `https://chatgpt.com`。
+- `experimental_private_api.quota_endpoint`：默认 `/backend-api/wham/usage`。
+- `experimental_private_api.reset_credits_endpoint`：默认 `/backend-api/wham/rate-limit-reset-credits`。
+- `experimental_private_api.account_endpoint`：默认空字符串。
+
+只要总开关开启，`accounts info <account>` 会把实验性数据放到独立层级下展示，避免和本地 metadata 混排。
 
 迁移相关命令：
 

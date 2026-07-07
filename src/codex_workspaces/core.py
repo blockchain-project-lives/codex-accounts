@@ -20,7 +20,14 @@ from typing import Iterable, List, Optional, Sequence, TextIO
 from .config import Config
 from .errors import CodexWorkspacesError
 from .platforms import SystemPlatform
-from .private_api import AccountRemoteInfo, AuthMaterial, ConfiguredHttpPrivateApiProvider, PrivateApiProvider, QuotaInfo
+from .private_api import (
+    AccountRemoteInfo,
+    AuthMaterial,
+    ConfiguredHttpPrivateApiProvider,
+    PrivateApiProvider,
+    QuotaInfo,
+    ResetCreditsInfo,
+)
 from .private_api.auth import extract_auth_material
 from .private_api.errors import (
     PrivateApiAuthError,
@@ -433,6 +440,8 @@ class WorkspaceManager:
                 private["base_url"] = defaults["base_url"]
             if not private.get("quota_endpoint"):
                 private["quota_endpoint"] = defaults["quota_endpoint"]
+            if not private.get("reset_credits_endpoint"):
+                private["reset_credits_endpoint"] = defaults["reset_credits_endpoint"]
         return data
 
     def write_tool_config(self, data: dict) -> None:
@@ -442,10 +451,12 @@ class WorkspaceManager:
         return {
             "enabled": False,
             "quota_enabled": False,
+            "reset_credits_enabled": False,
             "refresh_enabled": False,
             "provider": "codex",
             "base_url": "https://chatgpt.com",
             "quota_endpoint": "/backend-api/wham/usage",
+            "reset_credits_endpoint": "/backend-api/wham/rate-limit-reset-credits",
             "account_endpoint": "",
             "timeout_seconds": 10,
             "rate_limit_per_minute": 20,
@@ -465,10 +476,12 @@ class WorkspaceManager:
         allowed = {
             "experimental_private_api.enabled": "bool",
             "experimental_private_api.quota_enabled": "bool",
+            "experimental_private_api.reset_credits_enabled": "bool",
             "experimental_private_api.refresh_enabled": "bool",
             "experimental_private_api.provider": "str",
             "experimental_private_api.base_url": "str",
             "experimental_private_api.quota_endpoint": "str",
+            "experimental_private_api.reset_credits_endpoint": "str",
             "experimental_private_api.account_endpoint": "str",
             "experimental_private_api.timeout_seconds": "int",
             "experimental_private_api.rate_limit_per_minute": "int",
@@ -537,6 +550,7 @@ class WorkspaceManager:
         return ConfiguredHttpPrivateApiProvider(
             base_url=settings.get("base_url") or None,
             quota_endpoint=settings.get("quota_endpoint") or None,
+            reset_credits_endpoint=settings.get("reset_credits_endpoint") or None,
             account_endpoint=settings.get("account_endpoint") or None,
             timeout_seconds=int(settings.get("timeout_seconds") or 10),
             user_agent=f"codex-workspaces/{self.tool_version()} experimental-private-api",
@@ -545,6 +559,10 @@ class WorkspaceManager:
     def ensure_quota_endpoint_configured(self, settings: dict) -> None:
         if self.private_api_provider is None and not settings.get("quota_endpoint"):
             raise PrivateApiUnsupportedResponseError("quota endpoint is not configured")
+
+    def ensure_reset_credits_endpoint_configured(self, settings: dict) -> None:
+        if self.private_api_provider is None and not settings.get("reset_credits_endpoint"):
+            raise PrivateApiUnsupportedResponseError("reset credits endpoint is not configured")
 
     def private_api_error_payload(self, exc: Exception) -> dict[str, object]:
         if isinstance(exc, PrivateApiDisabledError):
@@ -946,10 +964,11 @@ class WorkspaceManager:
                 return
             self.require_external_terminal("stop")
 
-        if not self.platform.supports_app_control:
+        running = self.platform.app_running_status(self.config.app_name)
+        if not self.platform.supports_app_control and running is not True:
             self.fail(
-                "当前平台不支持自动关闭 Codex App。切换工作区时可使用 --no-stop。",
-                "App stop is only supported on macOS. Use --no-stop when switching workspaces on this platform.",
+                "当前平台未找到正在运行的 Codex App 进程，无法自动关闭。",
+                "No running Codex app process was found on this platform; cannot stop it automatically.",
             )
         self.platform.stop_app(
             self.config.app_name,
@@ -960,10 +979,10 @@ class WorkspaceManager:
 
     def start_codex(self) -> None:
         self.require_external_terminal("start")
-        if not self.platform.supports_app_control:
+        if not self.platform.supports_app_control and self.platform.app_running_status(self.config.app_name) is not False:
             self.fail(
-                "当前平台不支持自动启动 Codex App。",
-                "App start is only supported on macOS.",
+                "当前平台无法确认 Codex App 状态，无法自动启动。",
+                "Cannot confirm Codex app state on this platform; cannot start it automatically.",
             )
         self.info(self.message(f"正在启动 {self.config.app_name} ...", f"Starting {self.config.app_name} ..."))
         self.platform.start_app(self.config.app_name)
@@ -1295,6 +1314,7 @@ class WorkspaceManager:
         stop_first = True
         start_after = True
         force = False
+        app_was_running = False
         for arg in args:
             if arg == "--no-stop":
                 stop_first = False
@@ -1338,13 +1358,15 @@ class WorkspaceManager:
                 )
 
             if stop_first:
-                if self.platform.supports_app_control:
+                running = self.platform.app_running_status(self.config.app_name)
+                if self.platform.supports_app_control or running is True:
+                    app_was_running = running is not False
                     self.stop_codex(force)
                 else:
                     self.info(
                         self.message(
-                            "当前平台不支持自动关闭 Codex App，继续只切换工作区链接。",
-                            "App stop is not supported on this platform; continuing with the workspace link switch.",
+                            "未找到正在运行的 Codex App 进程，继续只切换工作区链接。",
+                            "No running Codex app process was found; continuing with the workspace link switch.",
                         )
                     )
 
@@ -1363,13 +1385,13 @@ class WorkspaceManager:
             self.info(self.message(f"已切换到: {clean_name} -> {directory}", f"Switched to: {clean_name} -> {directory}"))
 
         if start_after:
-            if self.platform.supports_app_control:
+            if self.platform.supports_app_control or app_was_running:
                 self.start_codex()
             else:
                 self.info(
                     self.message(
-                        "当前平台不支持自动启动 Codex App，工作区链接已完成切换。",
-                        "App start is not supported on this platform; the workspace link has been switched.",
+                        "未记录到切换前运行的 Codex App 进程，跳过自动启动。",
+                        "No previously running Codex app process was recorded; skipping app start.",
                     )
                 )
 
@@ -1718,18 +1740,51 @@ class WorkspaceManager:
                 default_account = workspace_meta.default_account_id
         default_refs, active_refs = self.workspace_account_references(account_id)
         self.info(self.bold(self.message(f"账号: {account_id}", f"Account: {account_id}")))
-        self.info(f"current: {self._yes_no(account_id == current_account)}")
-        self.info(f"default_for_current_workspace: {self._yes_no(account_id == default_account)}")
-        self.info(f"current_workspace: {current_workspace or '-'}")
-        self.info(f"auth_exists: {self._yes_no(self.store.account_auth_path(account_id).is_file())}")
-        self.info(f"orphan: {self._yes_no(not default_refs and not active_refs)}")
-        self.info(f"default_workspaces: {self.format_refs(default_refs)}")
-        self.info(f"active_workspaces: {self.format_refs(active_refs)}")
-        self.info(f"path: {self.store.account_dir(account_id)}")
-        self.info(f"auth_path: {self.store.account_auth_path(account_id)}")
-        self.info(f"meta_path: {self.store.account_meta_path(account_id)}")
-        for key, value in meta.to_dict().items():
-            self.info(f"{key}: {value if value is not None else '-'}")
+        self.render_info_section(
+            "Summary",
+            [
+                ("name", meta.name),
+                ("source", meta.source),
+                ("bound_workspace", meta.bound_workspace),
+                ("email", meta.email),
+                ("plan", meta.plan),
+                ("auth_exists", self._yes_no(self.store.account_auth_path(account_id).is_file())),
+                ("note", meta.notes),
+                ("created_at", meta.created_at),
+                ("updated_at", meta.updated_at),
+                ("last_used_at", meta.last_used_at),
+            ],
+        )
+        self.render_info_section(
+            "Workspace References",
+            [
+                ("current", self._yes_no(account_id == current_account)),
+                ("default_for_current_workspace", self._yes_no(account_id == default_account)),
+                ("current_workspace", current_workspace),
+                ("reference_status", self.account_reference_status(default_refs, active_refs)),
+                ("orphan", self._yes_no(not default_refs and not active_refs)),
+                ("default_workspaces", self.format_refs(default_refs)),
+                ("active_workspaces", self.format_refs(active_refs)),
+            ],
+        )
+        self.render_info_section(
+            "Identifiers",
+            [
+                ("account_id", meta.account_id),
+                ("user_id", meta.user_id),
+                ("organization_id", meta.organization_id),
+                ("auth_hash", meta.auth_hash),
+            ],
+        )
+        self.render_info_section(
+            "Paths",
+            [
+                ("path", self.store.account_dir(account_id)),
+                ("auth_path", self.store.account_auth_path(account_id)),
+                ("meta_path", self.store.account_meta_path(account_id)),
+            ],
+        )
+        self.render_account_experimental_section(account_id, meta)
 
     def account_reference_status(self, default_refs: Sequence[str], active_refs: Sequence[str]) -> str:
         if not default_refs and not active_refs:
@@ -1758,6 +1813,117 @@ class WorkspaceManager:
         if not account_id:
             self.fail("当前工作区没有 active/default account。", "Current workspace has no active/default account.")
         return name, current.path, meta
+
+    def get_account_reset_credits(self, account_id: str) -> ResetCreditsInfo:
+        settings = self.ensure_private_api_enabled("reset_credits")
+        self.ensure_reset_credits_endpoint_configured(settings)
+        auth_material = self.account_auth_material(account_id)
+        provider = self.private_provider(settings)
+        return provider.get_reset_credits(auth_material)
+
+    def reset_credits_for_account_or_error(self, account_id: str) -> ResetCreditsInfo | None:
+        settings = self.private_api_settings()
+        if not settings.get("enabled") or not settings.get("reset_credits_enabled"):
+            return None
+        try:
+            return self.get_account_reset_credits(account_id)
+        except (CodexWorkspacesError, PrivateApiError, Exception) as exc:
+            return ResetCreditsInfo(error=redact_sensitive_text(str(exc)))
+
+    def render_info_section(self, title: str, rows: Sequence[tuple[str, object | None]], *, indent: int = 0) -> None:
+        prefix = " " * indent
+        self.info(f"{prefix}{title}:")
+        for key, value in rows:
+            self.info(f"{prefix}  {key}: {self.display_value(value)}")
+
+    def render_account_experimental_section(self, account_id: str, meta: AccountMeta) -> None:
+        settings = self.private_api_settings()
+        if not settings.get("enabled"):
+            return
+        self.info("Experimental:")
+        self.render_info_section(
+            "private_api",
+            [
+                ("enabled", self._yes_no(bool(settings.get("enabled")))),
+                ("quota_enabled", self._yes_no(bool(settings.get("quota_enabled")))),
+                ("reset_credits_enabled", self._yes_no(bool(settings.get("reset_credits_enabled")))),
+                ("refresh_enabled", self._yes_no(bool(settings.get("refresh_enabled")))),
+                ("provider", settings.get("provider")),
+                ("base_url", settings.get("base_url")),
+                ("quota_endpoint", settings.get("quota_endpoint")),
+                ("reset_credits_endpoint", settings.get("reset_credits_endpoint")),
+                ("account_endpoint", settings.get("account_endpoint")),
+                ("cache_ttl_seconds", settings.get("cache_ttl_seconds")),
+            ],
+            indent=2,
+        )
+        if meta.remote:
+            self.render_info_section(
+                "remote_cache",
+                [(key, value) for key, value in sorted(meta.remote.items())],
+                indent=2,
+            )
+        if settings.get("quota_enabled"):
+            self.render_quota_info_section(self.quota_for_account_or_error(account_id), indent=2)
+        if settings.get("reset_credits_enabled"):
+            reset_credits = self.reset_credits_for_account_or_error(account_id)
+            if reset_credits is not None:
+                self.render_reset_credits_info(reset_credits, indent=2)
+
+    def render_reset_credits_info(self, info: ResetCreditsInfo, *, indent: int = 0) -> None:
+        prefix = " " * indent
+        self.info(f"{prefix}reset_credits:")
+        if info.error:
+            self.info(f"{prefix}  error: {info.error}")
+            return
+        self.info(f"{prefix}  available_count: {self.display_value(info.available_count)}")
+        self.info(f"{prefix}  fetched_at: {self.display_timestamp(info.fetched_at)}")
+        credits = info.credits or []
+        if not credits:
+            self.info(f"{prefix}  credits: -")
+            return
+        for index, credit in enumerate(credits, start=1):
+            self.info(f"{prefix}  credits[{index}]:")
+            self.info(f"{prefix}    status: {self.display_value(credit.status)}")
+            self.info(f"{prefix}    title: {self.display_value(credit.title)}")
+            self.info(f"{prefix}    granted_at: {self.display_timestamp(credit.granted_at)}")
+            self.info(f"{prefix}    expires_at: {self.display_timestamp(credit.expires_at)}")
+
+    def render_quota_info_section(self, quota: QuotaInfo, *, indent: int = 0) -> None:
+        prefix = " " * indent
+        self.info(f"{prefix}quota:")
+        self.info(f"{prefix}  status: {self.display_value(quota.status)}")
+        self.info(f"{prefix}  used: {self.percent_text(quota.used_percent)}")
+        self.info(f"{prefix}  remaining: {self.percent_text(quota.remaining_percent)}")
+        self.info(f"{prefix}  reset_at: {self.display_timestamp(quota.reset_at)}")
+        self.info(
+            f"{prefix}  window: {str(quota.window_duration_mins) + 'm' if quota.window_duration_mins is not None else '-'}"
+        )
+        self.info(f"{prefix}  plan: {self.display_value(quota.plan)}")
+        self.info(f"{prefix}  source: {self.display_value(quota.source)}")
+        self.info(f"{prefix}  cached: {self._yes_no(quota.cached)}")
+        self.info(f"{prefix}  fetched_at: {self.display_timestamp(quota.fetched_at)}")
+        if quota.error:
+            self.info(f"{prefix}  error: {redact_sensitive_text(quota.error)}")
+
+    def display_value(self, value: object | None) -> str:
+        if value is None:
+            return "-"
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, bool):
+            return self._yes_no(value)
+        text = str(value)
+        return text if text else "-"
+
+    def display_timestamp(self, value: Optional[str]) -> str:
+        if not value:
+            return "-"
+        try:
+            timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return value
+        return timestamp.astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
 
     def quota_cache_path(self, account_id: str) -> Path:
         return self.config.cache_dir / "quota" / f"{account_id}.json"
@@ -2959,16 +3125,16 @@ def usage(lang: str) -> str:
   codex-workspaces <工作区名>
       切换 ~/.codex 链接到指定工作区目录。
       macOS 上默认会关闭 Codex App、切换工作区、再启动 Codex App。
-      Linux/Windows 上会跳过 App 启停，只切换工作区链接。
+      Linux/Windows 上如果能在进程列表找到 Codex，会记录进程命令、关闭进程、切换链接、再恢复启动；找不到进程时只切换链接。
 
   codex-workspaces stop [--force]
-      关闭 Codex App。当前仅支持 macOS。
+      关闭 Codex App。macOS 使用 App 控制；Linux/Windows 使用已发现的进程。
 
   codex-workspaces start
-      启动 Codex App。当前仅支持 macOS。
+      启动 Codex App。macOS 使用 App 控制；Linux/Windows 需要先记录到运行中的进程命令。
 
   codex-workspaces restart [--force]
-      重启 Codex App。当前仅支持 macOS。
+      重启 Codex App。macOS 使用 App 控制；Linux/Windows 使用已发现的进程命令。
 
   codex-workspaces init <工作区名> [--migrate-current]
       初始化新的工作区目录 ~/.codex-workspaces/workspaces/<工作区名>。
@@ -3063,16 +3229,16 @@ Usage:
   codex-workspaces <workspace>
       Switch the ~/.codex link to the selected workspace directory.
       On macOS this quits Codex App, switches the workspace, then starts Codex App.
-      On Linux and Windows app control is skipped and only the workspace link changes.
+      On Linux and Windows, if Codex is found in the process list, the CLI records its command, stops it, switches the link, and starts it again; if no process is found, only the link changes.
 
   codex-workspaces stop [--force]
-      Quit Codex App. Currently supported on macOS only.
+      Quit Codex App. macOS uses app control; Linux/Windows use discovered processes.
 
   codex-workspaces start
-      Start Codex App. Currently supported on macOS only.
+      Start Codex App. macOS uses app control; Linux/Windows need a previously recorded process command.
 
   codex-workspaces restart [--force]
-      Restart Codex App. Currently supported on macOS only.
+      Restart Codex App. macOS uses app control; Linux/Windows use discovered process commands.
 
   codex-workspaces init <workspace> [--migrate-current]
       Initialize a new workspace directory under ~/.codex-workspaces/workspaces/.

@@ -9,7 +9,7 @@
 - 跨平台 Python 3 CLI，支持 Linux、macOS 和 Windows。
 - 原来的 macOS Bash 脚本，仍保留在 [`codex-workspaces`](macos/codex-workspaces)，兼容已经使用 shell 安装方式的用户。
 
-在 macOS 上，Python CLI 保留原来的 App 流程：关闭 Codex App、切换工作区链接、再启动 Codex App。在 Linux 和 Windows 上，CLI 会跳过 App 启停，只切换工作区链接。
+在 macOS 上，Python CLI 保留原来的 App 流程：关闭 Codex App、切换工作区链接、再启动 Codex App。在 Linux 和 Windows 上，CLI 会先检查进程列表；如果找到正在运行的 Codex 进程，会记录进程命令、关闭进程、切换工作区链接、再恢复启动。找不到进程时才只切换工作区链接。
 
 ## 功能
 
@@ -23,7 +23,7 @@
 - 导出和导入账号快照备份包；包含 auth 的备份会明确提示凭据风险。
 - 查看工作区/账号元数据，并通过 `doctor` 做账号诊断。
 - 迁移旧版 `~/.codex-<name>` 工作区，并导入旧 `~/.codex-accounts` 账号快照。
-- 保留 macOS 上 Codex App 的 `stop`、`start`、`restart`。
+- 保留 macOS 上 Codex App 的 `stop`、`start`、`restart`，并在 Linux/Windows 上支持发现运行中 Codex 进程后的 best-effort 启停。
 - 以只读方式读取 Codex `state_*.sqlite`，展示每日、模型、工作区、账号、JSON 和 Markdown 形式的本地 token 统计。
 - 在检测到 Codex 内置 Terminal 且无法安全转交时，阻止危险操作。
 - 支持中英文输出，可通过 `CODEX_WORKSPACES_LANG` 指定。
@@ -32,7 +32,7 @@
 ## 要求
 
 - Python 3.9 或更新版本。
-- 只有 `start`、`stop`、`restart` 这类 Codex App 控制命令要求 macOS。
+- macOS 使用原生 Codex App 控制；Linux/Windows 对 `start`、`stop`、`restart` 使用 best-effort 进程检测。
 - Linux 和 macOS 使用目录软链接。
 - Windows 优先使用目录软链接，不可用时回退到目录 junction。
 
@@ -86,6 +86,23 @@ tmp="$(mktemp -t codex-workspaces.XXXXXX)" && curl -fsSL https://raw.githubuserc
 ```
 
 可通过 `CODEX_WORKSPACES_LINK` 和 `CODEX_WORKSPACES_ROOT` 自定义路径。
+
+## 仓库结构
+
+现在这个仓库按“Python 核心 + 平台适配 + 实验能力”来组织：
+
+- `src/codex_workspaces/cli.py`：命令行解析和命令分发入口。
+- `src/codex_workspaces/core.py`：workspace 切换、accounts、多账号、迁移、doctor、stats、config 的主流程。
+- `src/codex_workspaces/store.py`：元数据持久化、目录布局和安全写入。
+- `src/codex_workspaces/platforms.py`：macOS App 控制，以及 Linux/Windows 的进程发现与重启逻辑。
+- `src/codex_workspaces/private_api/`：实验性的 realtime quota / reset credits provider、auth 提取、模型和错误定义。
+- `src/codex_workspaces/stats.py`：本地 SQLite 使用量统计与聚合。
+- `src/codex_workspaces/auth_inspector.py`：只读解析本地 `auth.json` 元信息，不发网络请求。
+- `macos/`：保留的原 Bash 版本和单独文档。
+- `docs/`：设计、测试、发布文档。
+- `tests/`：Python 包的单元测试和 CLI 测试。
+
+如果你想快速读懂代码，建议顺序是 `cli.py -> core.py -> store.py -> private_api/`。
 
 ## 使用
 
@@ -160,7 +177,7 @@ codex-workspaces use personal
 codex-workspaces switch work
 ```
 
-macOS 上默认会在切换前后关闭和启动 Codex App。需要时可以跳过：
+macOS 上默认会在切换前后关闭和启动 Codex App。Linux/Windows 上如果能发现正在运行的 Codex 进程，也会按同样流程处理。需要时可以跳过：
 
 ```bash
 codex-workspaces work --no-stop --no-start
@@ -184,24 +201,32 @@ codex-workspaces stats work --days 14
 
 `stats` 只读取本地 SQLite 状态文件。无法识别的 workspace/account/model 会显示为 `unknown`；统计结果取决于各工作区里实际存在的 Codex 本地文件。
 
-## 实验性实时额度查询
+## 实验性实时账号数据
 
-`codex-workspaces` 可以通过实验性 private API provider 查询已管理账号的实时额度。
+`codex-workspaces` 可以通过实验性 private API provider 查询已管理账号的实时账号数据。
 
-该功能默认关闭，依赖 Codex/OpenAI 内部接口，可能随上游变化而失效，也可能返回 `401`/`403`/`429`。它不是 workspace/account 本地切换的依赖。
+这些能力默认关闭，依赖 Codex/OpenAI 内部接口，可能随上游变化而失效，也可能返回 `401`/`403`/`429`。它们不是 workspace/account 本地切换的依赖。
 
 显式开启：
 
 ```bash
 codex-workspaces config set experimental_private_api.enabled true
 codex-workspaces config set experimental_private_api.quota_enabled true
+codex-workspaces config set experimental_private_api.reset_credits_enabled true
 ```
 
-当前 endpoint 配置字段是：
+开关和 endpoint 配置字段：
 
+- `experimental_private_api.enabled`：总开关。关闭时不会发起任何实验性账号查询。
+- `experimental_private_api.quota_enabled`：开启实时 WHAM quota 查询。
+- `experimental_private_api.reset_credits_enabled`：开启 reset credits 查询，并在 `accounts info` 里显示该区块。
+- `experimental_private_api.refresh_enabled`：预留给显式远端 refresh 流程，默认仍关闭。
 - `experimental_private_api.base_url` 默认 `https://chatgpt.com`
 - `experimental_private_api.quota_endpoint` 默认 `/backend-api/wham/usage`
+- `experimental_private_api.reset_credits_endpoint` 默认 `/backend-api/wham/rate-limit-reset-credits`
 - `experimental_private_api.account_endpoint` 默认空字符串
+
+只要总开关开启，`accounts info <account>` 就会展示独立的 `Experimental` 区域；哪些实验能力已启用、各自的 endpoint 是什么、以及实时返回的数据，都会按层级展示，避免和本地 metadata 混在一起。
 
 查询当前账号额度：
 
@@ -214,6 +239,7 @@ codex-workspaces quota --json
 
 ```bash
 codex-workspaces accounts quota acct_work
+codex-workspaces accounts info acct_work
 ```
 
 查询所有账号额度：
@@ -234,6 +260,8 @@ codex-workspaces accounts refresh --all --json
 refresh 当前仍默认关闭。当前 `account_endpoint` 不是 Codex responses API；除非 provider 实现了 POST responses 流程，否则不要把它指向 responses endpoint。
 
 实时额度能力使用显式实验配置、请求超时、串行账号遍历和本地 TTL 缓存，缓存目录为 `~/.codex-workspaces/cache/quota/`。缓存只保存额度摘要和 auth hash，不保存 token、cookie、authorization header 或原始 `auth.json`。
+
+当 `experimental_private_api.reset_credits_enabled` 为 `true` 时，`accounts info <account>` 会显示 reset credits，包括本地时区的 granted/expires 时间。输出会刻意省略 credit ID 和其他唯一标识。如果 `experimental_private_api.quota_enabled` 也开启，同一个命令里还会一并展示嵌套的 quota 区块。
 
 `stats` 和 `quota` 不同：`stats` 是本地 SQLite 历史统计，`quota` 是实时远端查询。额度查询失败不会影响本地 workspace/account 切换。
 
@@ -268,7 +296,7 @@ codex-workspaces rename work main
 codex-workspaces delete old-workspace --force
 ```
 
-macOS 上控制 Codex App：
+控制 Codex App：
 
 ```bash
 codex-workspaces stop
@@ -282,7 +310,7 @@ codex-workspaces restart
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `CODEX_APP_NAME` | `Codex` | macOS App 名称。 |
+| `CODEX_APP_NAME` | `Codex` | macOS App 名称，也是 Linux/Windows 上匹配的进程名。 |
 | `CODEX_QUIT_TIMEOUT` | `20` | 等待 App 退出的秒数。 |
 | `CODEX_WORKSPACES_LINK` | `$HOME/.codex` | 当前工作区链接路径。 |
 | `CODEX_WORKSPACES_ROOT` | `$HOME/.codex-workspaces` | workspaces、accounts、backups 和 lock 所在管理根目录。 |

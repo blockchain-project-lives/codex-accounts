@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -76,6 +77,38 @@ class AccountRemoteInfo:
     plan: str | None = None
     quota: QuotaInfo | None = None
     fetched_at: str | None = None
+
+
+@dataclass
+class ResetCreditEntry:
+    status: str | None = None
+    title: str | None = None
+    granted_at: str | None = None
+    expires_at: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "title": self.title,
+            "granted_at": self.granted_at,
+            "expires_at": self.expires_at,
+        }
+
+
+@dataclass
+class ResetCreditsInfo:
+    available_count: int | None = None
+    credits: list[ResetCreditEntry] | None = None
+    fetched_at: str | None = None
+    error: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "available_count": self.available_count,
+            "credits": [credit.to_dict() for credit in (self.credits or [])],
+            "fetched_at": self.fetched_at,
+            "error": self.error,
+        }
 
 
 def as_float(value: Any) -> float | None:

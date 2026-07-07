@@ -4,11 +4,31 @@ All notable changes to `codex-workspaces` will be documented in this file.
 
 This project follows a simple changelog format while it is still pre-release.
 
+## 0.3.6 - 2026-07-07
+
+### Added
+
+- Added experimental reset credits lookup through `https://chatgpt.com/backend-api/wham/rate-limit-reset-credits`.
+- Added reset credits summary display to `accounts info`, including `available_count` and per-credit `status`, `title`, `granted_at`, and `expires_at`.
+
+### Changed
+
+- Added `experimental_private_api.reset_credits_enabled` and `experimental_private_api.reset_credits_endpoint` with a default WHAM reset credits endpoint.
+- Converted reset credit grant and expiry timestamps from UTC to local time in CLI output.
+- Reworked `accounts info` into grouped local/paths/references/experimental sections so enabled experimental data is rendered hierarchically with better readability.
+- Reorganized README and design docs to document the repo/module layout and the experimental private API switch model more clearly.
+
+### Fixed
+
+- Kept reset credits output redacted by omitting token values, cookies, and full unique credit IDs.
+- Surfaced reset credits authorization failures inside `accounts info` as friendly account detail errors instead of tracebacks.
+
 ## 0.3.5 - 2026-07-06
 
 ### Fixed
 
 - Fixed `accounts info "$(codex-workspaces accounts current)"` compatibility by extracting `active=acct_*` from the human-readable current-account output.
+- Added Linux/Windows best-effort process-based Codex stop/start around workspace switches when a running Codex process can be found; missing processes now fall back to link-only switching.
 
 ## 0.3.4 - 2026-07-04
 

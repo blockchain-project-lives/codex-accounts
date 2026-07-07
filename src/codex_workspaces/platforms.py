@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import json
 import os
 import platform
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Optional, Sequence, TextIO
 
@@ -35,6 +38,13 @@ CODEX_DELEGATE_UNSET_ENV = (
 FORCE_QUIT_GRACE_SECONDS = 15
 
 
+@dataclass(frozen=True)
+class AppProcess:
+    pid: int
+    command: Optional[Sequence[str]] = None
+    command_line: Optional[str] = None
+
+
 class SystemPlatform:
     def __init__(
         self,
@@ -44,6 +54,7 @@ class SystemPlatform:
         self.env = dict(os.environ if env is None else env)
         self.python_executable = python_executable or sys.executable
         self.system = platform.system().lower()
+        self._last_app_process: Optional[AppProcess] = None
 
     @property
     def is_macos(self) -> bool:
@@ -132,6 +143,9 @@ class SystemPlatform:
         raise CodexWorkspacesError(f"Refusing to remove non-link path: {link}")
 
     def app_running_status(self, app_name: str) -> Optional[bool]:
+        if not self.is_macos:
+            processes = self.app_processes(app_name)
+            return None if processes is None else bool(processes)
         if shutil.which("pgrep") is None:
             return None
         result = subprocess.run(
@@ -146,6 +160,95 @@ class SystemPlatform:
             return False
         return None
 
+    def app_processes(self, app_name: str) -> Optional[list[AppProcess]]:
+        if self.is_macos:
+            return None
+        if self.is_windows:
+            return self.windows_app_processes(app_name)
+        return self.posix_app_processes(app_name)
+
+    def posix_app_processes(self, app_name: str) -> Optional[list[AppProcess]]:
+        if shutil.which("ps") is None:
+            return None
+        result = subprocess.run(
+            ["ps", "-eo", "pid=,comm=,args="],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            return None
+        processes: list[AppProcess] = []
+        app_key = app_name.lower()
+        for line in result.stdout.splitlines():
+            parts = line.strip().split(None, 2)
+            if len(parts) < 2:
+                continue
+            try:
+                pid = int(parts[0])
+            except ValueError:
+                continue
+            if pid == os.getpid():
+                continue
+            command_name = Path(parts[1]).name
+            command_line = parts[2] if len(parts) > 2 else parts[1]
+            command_head = command_line.split(None, 1)[0] if command_line else command_name
+            candidates = {
+                command_name.lower(),
+                Path(command_name).stem.lower(),
+                Path(command_head).name.lower(),
+                Path(command_head).stem.lower(),
+            }
+            if app_key not in candidates:
+                continue
+            try:
+                command = shlex.split(command_line)
+            except ValueError:
+                command = [command_head]
+            processes.append(AppProcess(pid=pid, command=command, command_line=command_line))
+        return processes
+
+    def windows_app_processes(self, app_name: str) -> Optional[list[AppProcess]]:
+        powershell = shutil.which("powershell") or shutil.which("pwsh")
+        if powershell is None:
+            return None
+        safe_app_name = app_name.replace("'", "''")
+        script = (
+            "$name = '" + safe_app_name + "'; "
+            "Get-CimInstance Win32_Process | "
+            "Where-Object { $_.Name -ieq $name -or [IO.Path]::GetFileNameWithoutExtension($_.Name) -ieq $name } | "
+            "Select-Object ProcessId,Name,ExecutablePath,CommandLine | ConvertTo-Json -Compress"
+        )
+        result = subprocess.run(
+            [powershell, "-NoProfile", "-Command", script],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            return None
+        raw = result.stdout.strip()
+        if not raw:
+            return []
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        items = data if isinstance(data, list) else [data]
+        processes: list[AppProcess] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            try:
+                pid = int(item.get("ProcessId"))
+            except (TypeError, ValueError):
+                continue
+            command_line = item.get("CommandLine") if isinstance(item.get("CommandLine"), str) else None
+            executable = item.get("ExecutablePath") if isinstance(item.get("ExecutablePath"), str) else None
+            command = [executable] if executable else None
+            processes.append(AppProcess(pid=pid, command=command, command_line=command_line))
+        return processes
+
     def stop_app(
         self,
         app_name: str,
@@ -153,11 +256,9 @@ class SystemPlatform:
         force: bool,
         stdout: TextIO,
     ) -> None:
-        if not self.supports_app_control:
-            raise CodexWorkspacesError(
-                f"App stop is only supported on macOS. Use --no-stop on this platform."
-            )
-
+        if not self.is_macos:
+            self.stop_process_app(app_name, timeout, force, stdout)
+            return
         running = self.app_running_status(app_name)
         if running is False:
             print(f"{app_name} is not running.", file=stdout)
@@ -196,11 +297,86 @@ class SystemPlatform:
         print(f"{app_name} has quit.", file=stdout)
 
     def start_app(self, app_name: str) -> None:
-        if not self.supports_app_control:
-            raise CodexWorkspacesError("App start is only supported on macOS.")
+        if not self.is_macos:
+            self.start_process_app(app_name)
+            return
         result = subprocess.run(["open", "-a", app_name], check=False)
         if result.returncode != 0:
             raise CodexWorkspacesError(f"Could not start {app_name}.")
+
+    def stop_process_app(self, app_name: str, timeout: int, force: bool, stdout: TextIO) -> None:
+        self._last_app_process = None
+        processes = self.app_processes(app_name)
+        if processes is None:
+            print(f"Cannot inspect {app_name} processes on this platform; skipping app stop.", file=stdout)
+            return
+        if not processes:
+            print(f"{app_name} is not running.", file=stdout)
+            return
+
+        self._last_app_process = self.first_restartable_process(processes)
+        print(f"Quitting {app_name} ({len(processes)} process{'es' if len(processes) != 1 else ''}) ...", file=stdout)
+        self.terminate_processes(processes, force=False)
+
+        wait_limit = min(timeout, FORCE_QUIT_GRACE_SECONDS) if force else timeout
+        waited = 0
+        while self.app_running_status(app_name) and waited < wait_limit:
+            time.sleep(1)
+            waited += 1
+
+        if self.app_running_status(app_name):
+            if not force:
+                raise CodexWorkspacesError(
+                    f"{app_name} did not exit within {timeout}s; add --force to force quit"
+                )
+            print(f"{app_name} did not exit within {wait_limit}s; forcing it to quit.", file=stdout)
+            remaining = self.app_processes(app_name) or []
+            self.terminate_processes(remaining, force=True)
+            time.sleep(1)
+
+        print(f"{app_name} has quit.", file=stdout)
+
+    def first_restartable_process(self, processes: Sequence[AppProcess]) -> Optional[AppProcess]:
+        for process in processes:
+            if process.command_line or process.command:
+                return process
+        return None
+
+    def terminate_processes(self, processes: Sequence[AppProcess], *, force: bool) -> None:
+        if self.is_windows:
+            for process in processes:
+                args = ["taskkill", "/PID", str(process.pid), "/T"]
+                if force:
+                    args.append("/F")
+                subprocess.run(args, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        sig = signal.SIGKILL if force else signal.SIGTERM
+        for process in processes:
+            try:
+                os.kill(process.pid, sig)
+            except OSError:
+                pass
+
+    def start_process_app(self, app_name: str) -> None:
+        process = self._last_app_process
+        if process is None:
+            raise CodexWorkspacesError(
+                f"Could not start {app_name}: no previously running process command was recorded."
+            )
+        if self.is_windows:
+            command = process.command_line or (subprocess.list2cmdline(list(process.command)) if process.command else None)
+            if not command:
+                raise CodexWorkspacesError(f"Could not start {app_name}: recorded process has no command line.")
+            subprocess.Popen(command, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        if not process.command:
+            raise CodexWorkspacesError(f"Could not start {app_name}: recorded process has no command line.")
+        subprocess.Popen(
+            list(process.command),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
 
     def delegate_to_external_terminal(
         self,

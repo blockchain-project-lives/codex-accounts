@@ -11,7 +11,7 @@
 - 迁移行为：旧 `~/.codex-<name>` 工作区迁移、旧 `~/.codex-accounts` 导入、dry-run 不落盘、迁移前备份。
 - 统计行为：只读 `state_*.sqlite`，汇总 input/output/total token、模型、最近会话、每日、workspace、account，并覆盖 JSON/Markdown 输出。
 - 实验行为：private API 默认关闭、显式配置、mock provider 成功/失败、quota cache、JSON 输出脱敏、普通切换不触发 private API。
-- 平台行为：macOS App 控制可注入，非 macOS 自动跳过 App 启停，Codex 内置 Terminal 阻止或转交危险操作。
+- 平台行为：macOS App 控制可注入，Linux/Windows 进程级 App 控制可注入，找不到进程时自动跳过 App 启停，Codex 内置 Terminal 阻止或转交危险操作。
 
 ## 测试结构
 
@@ -130,11 +130,16 @@ CODEX_WORKSPACES_LINK="$tmp_home/.codex" \
 CODEX_WORKSPACES_ROOT="$tmp_home/.codex-workspaces" \
 codex-workspaces config set experimental_private_api.quota_enabled true
 
+CODEX_WORKSPACES_LINK="$tmp_home/.codex" \
+CODEX_WORKSPACES_ROOT="$tmp_home/.codex-workspaces" \
+codex-workspaces config set experimental_private_api.reset_credits_enabled true
+
 # 默认内置 chatgpt.com WHAM quota endpoint；开启后会真实请求实验性 private API。
 # CODEX_WORKSPACES_LINK="$tmp_home/.codex" \
 # CODEX_WORKSPACES_ROOT="$tmp_home/.codex-workspaces" \
 # codex-workspaces quota --json
 # codex-workspaces accounts list -a
+# codex-workspaces accounts info work
 
 # 新账号登录流程会切到临时 login-research 工作区，登录完成后恢复原工作区。
 # CODEX_WORKSPACES_LINK="$tmp_home/.codex" \

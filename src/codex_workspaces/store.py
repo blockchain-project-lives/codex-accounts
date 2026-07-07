@@ -151,10 +151,12 @@ class WorkspaceStore:
                 "experimental_private_api": {
                     "enabled": False,
                     "quota_enabled": False,
+                    "reset_credits_enabled": False,
                     "refresh_enabled": False,
                     "provider": "codex",
                     "base_url": "https://chatgpt.com",
                     "quota_endpoint": "/backend-api/wham/usage",
+                    "reset_credits_endpoint": "/backend-api/wham/rate-limit-reset-credits",
                     "account_endpoint": "",
                     "timeout_seconds": 10,
                     "rate_limit_per_minute": 20,
